@@ -135,8 +135,7 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY a single raw JSON object (no markdown fences, " &
-    "no extra text): {\"transmit\": true, \"message\": \"…\", " &
+  result.add("Return one JSON object: {\"transmit\": true, \"message\": \"…\", " &
     "\"notes\": \"…\"} — message at most " & $MaxMessageLen &
     " characters and reaching the runners next tick (transmit false for " &
     "silence, which costs the tide one unit instead of two); notes at " &
@@ -178,8 +177,7 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("YOUR NOTES:\n" &
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY a single raw JSON object (no markdown fences, " &
-    "no extra text): {\"move\": \"N\", \"notes\": \"…\"} — move " &
+  result.add("Return one JSON object: {\"move\": \"N\", \"notes\": \"…\"} — move " &
     "is one of N, S, E, W, WAIT (N is up, S is down); notes at most " &
     $MaxRunnerNotes & " characters.")
 
@@ -311,13 +309,13 @@ proc parseJsonObject*(text: string): JsonNode =
   if result.kind != JObject:
     raise newException(LighthouseError, "response must be a JSON object")
 
-proc requestForMessages(client: LlmClient, system: string, messages: JsonNode,
-    slot: int): tuple[url: string, headers: HttpHeaders, body: string] =
+proc requestFor(client: LlmClient, system, user: string, slot: int):
+    tuple[url: string, headers: HttpHeaders, body: string] =
   var body = %*{
     "model": client.model,
     "max_tokens": client.maxOutputTokens,
     "system": system,
-    "messages": messages
+    "messages": [{"role": "user", "content": user}]
   }
   var headers: HttpHeaders
   headers["content-type"] = "application/json"
@@ -331,10 +329,6 @@ proc requestForMessages(client: LlmClient, system: string, messages: JsonNode,
     result.url = AnthropicUrl
   result.headers = headers
   result.body = $body
-
-proc requestFor(client: LlmClient, system, user: string, slot: int):
-    tuple[url: string, headers: HttpHeaders, body: string] =
-  client.requestForMessages(system, %*[{"role": "user", "content": user}], slot)
 
 proc textOf(client: LlmClient, response: Response, error, url: string):
     string =
@@ -363,30 +357,13 @@ proc textOf(client: LlmClient, response: Response, error, url: string):
 
 # ---- Decisions --------------------------------------------------------------
 
-proc sendMessages(client: LlmClient, system: string, messages: JsonNode,
-    slot: int): string =
-  var batch: RequestBatch
-  let request = client.requestForMessages(system, messages, slot)
-  batch.post(request.url, request.headers, request.body, $slot)
-  let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
-  client.textOf(responses[0].response, responses[0].error, request.url)
-
 proc choosePromptAction*(client: LlmClient, selection: PromptSelection, view: JsonNode,
     prompt: string, seat: int): Decision =
   let prompts = promptsFromView(selection, view, prompt)
-  var messages = %*[{"role": "user", "content": prompts.user}]
-  let answer = client.sendMessages(prompts.system, messages, seat)
-  try:
-    return parseReply(seat, parseJsonObject(answer))
-  except LighthouseError as firstErr:
-    echo "lighthouse llm: slot ", seat, " reply rejected (", firstErr.msg,
-      "); retrying once for valid JSON"
-    messages.add(%*{"role": "assistant", "content": answer})
-    messages.add(%*{
-      "role": "user",
-      "content": "Your previous reply could not be parsed (" & firstErr.msg &
-        "). Reply with ONLY a single raw JSON object matching the required " &
-        "schema, with no markdown fences and no extra text."
-    })
-    let retryAnswer = client.sendMessages(prompts.system, messages, seat)
-    parseReply(seat, parseJsonObject(retryAnswer))
+  var batch: RequestBatch
+  let request = client.requestFor(prompts.system, prompts.user, seat)
+  batch.post(request.url, request.headers, request.body, $seat)
+  let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
+  let answer = client.textOf(responses[0].response,
+    responses[0].error, request.url)
+  parseReply(seat, parseJsonObject(answer))

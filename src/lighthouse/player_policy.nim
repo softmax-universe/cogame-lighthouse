@@ -135,11 +135,10 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Return one JSON object: {\"transmit\": true, \"message\": \"…\", " &
-    "\"notes\": \"…\"} — message at most " & $MaxMessageLen &
-    " characters and reaching the runners next tick (transmit false for " &
-    "silence, which costs the tide one unit instead of two); notes at " &
-    "most " & $MaxKeeperNotes & " characters.")
+  result.add("Send a message with {\"transmit\":true,\"message\":\"…\"}, " &
+    "or stay silent with {\"transmit\":false}. Messages reach the runners next tick " &
+    "and can contain up to " & $MaxMessageLen & " characters. " &
+    "You may add a short private notes string.")
 
 proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("Tick " & $view["tick"].getInt() & " of " &
@@ -177,9 +176,8 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("YOUR NOTES:\n" &
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Return one JSON object: {\"move\": \"N\", \"notes\": \"…\"} — move " &
-    "is one of N, S, E, W, WAIT (N is up, S is down); notes at most " &
-    $MaxRunnerNotes & " characters.")
+  result.add("Choose N, S, E, W, or WAIT (N is up, S is down). " &
+    "Reply like {\"move\":\"N\"}. You may add a short private notes string.")
 
 proc keeperSimFromView(view: JsonNode): Sim =
   ## Rebuild only the keeper-visible rule state used by the prompt and
@@ -351,9 +349,11 @@ proc textOf(client: LlmClient, response: Response, error, url: string):
   for contentBlock in payload["content"]:
     if contentBlock{"type"}.getStr() == "text":
       result.add(contentBlock{"text"}.getStr())
-  if payload{"stop_reason"}.getStr() == "max_tokens" and '{' notin result:
-    raise newException(LighthouseError, "reply cut off at max_tokens " &
-      "before any JSON: " & cleanText(result, 160).replace("\n", " "))
+  if payload{"stop_reason"}.getStr() == "max_tokens":
+    try:
+      discard parseJsonObject(result)
+    except LighthouseError:
+      raise newException(LighthouseError, "incomplete model decision at output token limit")
 
 # ---- Decisions --------------------------------------------------------------
 

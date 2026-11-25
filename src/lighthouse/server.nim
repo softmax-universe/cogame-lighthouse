@@ -560,7 +560,13 @@ proc websocketHandler(
         return
       try:
         let payload = parseJson(message.data)
-        if payload{"type"}.getStr() == "decision":
+        if payload{"type"}.getStr() == "decision_failed":
+          let tick = payload["tick"].getInt()
+          withLock stateLock:
+            if tick == state.pendingTick and state.failedSlot < 0:
+              state.failedSlot = slot
+              state.failureMessage = "seat " & $slot & " could not produce a decision on tick " & $tick
+        elif payload{"type"}.getStr() == "decision":
           let tick = payload["tick"].getInt()
           let action = payload["action"]
           if action.kind != JObject:

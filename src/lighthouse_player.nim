@@ -25,8 +25,7 @@ As RUNNER: you are blind. Obey the keeper's last order for your alias as
 long as that direction is open in your 3x3 window. If it is blocked,
 take the open direction closest to the ordered one. With no order, hug
 the left wall consistently so the keeper can predict you. Never step
-into water. Keep your last few moves and bumps in your notes so the
-keeper's corrections make sense.
+into water.
 """
 
 when isMainModule:
@@ -73,9 +72,15 @@ when isMainModule:
       else:
         episodeSelection = some(selection)
       let view = payload["view"]
-      let decision =
-        if scripted: scriptedActionFromView(view)
-        else: choosePromptAction(client, selection, view, prompt, slot)
+      var decision: Decision
+      try:
+        decision =
+          if scripted: scriptedActionFromView(view)
+          else: choosePromptAction(client, selection, view, prompt, slot)
+      except CatchableError as error:
+        stderr.writeLine("lighthouse player: decision failed: ", error.msg)
+        socket.send($ %*{"type": "decision_failed", "tick": payload["tick"]})
+        continue
       socket.send($ %*{
         "type": "decision", "tick": payload["tick"],
         "source": (if scripted: "scripted" else: "player"),

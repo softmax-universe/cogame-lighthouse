@@ -357,12 +357,12 @@ proc parseKeeperReply*(payload: JsonNode): Decision =
   if flag.isNil or flag.kind != JBool:
     raise newException(LighthouseError, "transmit must be a boolean")
   let notesNode = payload{"notes"}
-  if not notesNode.isNil:
+  if not notesNode.isNil and notesNode.kind != JNull:
     if notesNode.kind != JString:
       raise newException(LighthouseError, "notes must be a string")
     result.notes = cleanText(notesNode.getStr(), MaxKeeperNotes)
   let messageNode = payload{"message"}
-  if messageNode.isNil:
+  if messageNode.isNil or messageNode.kind == JNull:
     if flag.getBool():
       raise newException(LighthouseError, "message must be a string")
   else:
@@ -378,7 +378,7 @@ proc parseRunnerReply*(payload: JsonNode): Decision =
   if payload.kind != JObject:
     raise newException(LighthouseError, "reply is not a JSON object")
   let notesNode = payload{"notes"}
-  if not notesNode.isNil:
+  if not notesNode.isNil and notesNode.kind != JNull:
     if notesNode.kind != JString:
       raise newException(LighthouseError, "notes must be a string")
     result.notes = cleanText(notesNode.getStr(), MaxRunnerNotes)

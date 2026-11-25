@@ -153,7 +153,8 @@ def verify_model_episode(*, invalid: bool = False) -> None:
                 assert game.wait(timeout=60) != 0
                 assert ModelStub.calls == [("/v1/messages", "1")]
                 assert not (work / "results.json").exists()
-                assert (work / "player_failure.json").is_file()
+                failure = (work / "player_failure.json").read_text()
+                assert "could not produce a decision" in failure, failure
                 print("malformed model reply: one HTTP call, player failure, no scores")
                 return
             assert game.wait(timeout=60) == 0, (work / "game.log").read_text()

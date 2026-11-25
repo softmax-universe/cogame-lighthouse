@@ -203,6 +203,8 @@ suite "reply parsing":
     check parseRunnerReply(parseJson("""{"move":"N"}""")).move == mvNorth
     check parseRunnerReply(parseJson("""{"move":" E "}""")).move == mvEast
     check parseRunnerReply(parseJson("""{"move":"S","notes":"x"}""")).notes == "x"
+    check parseRunnerReply(parseJson("""{"move":"S","notes":null}""")).notes == ""
+    check not parseKeeperReply(parseJson("""{"transmit":false,"message":null,"notes":null}""")).transmit
     check parseRunnerReply(parseJson("""{"move":"W"}""")).move == mvWest
     check parseRunnerReply(parseJson("""{"move":"WAIT"}""")).move == mvWait
     for bad in [

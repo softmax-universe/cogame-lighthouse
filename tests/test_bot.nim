@@ -260,11 +260,17 @@ suite "reply parsing":
       expect LighthouseError:
         discard parseKeeperReply(parseJson(bad))
 
-  test "the transport requires strict JSON objects":
+  test "the transport accepts canonical JSON objects and a single Markdown fence":
     check parseJsonObject("""{"move":"N"}""")["move"].getStr() == "N"
     check parseJsonObject("  {\"move\":\"S\"} \n")["move"].getStr() == "S"
+    check parseJsonObject("```json\n{\"move\":\"N\"}\n```")["move"].getStr() == "N"
+    check parseJsonObject("```\n{\"move\":\"W\",\"notes\":\"ok\"}\n```")["move"].getStr() == "W"
+    check parseJsonObject("  ```JSON\r\n{\"transmit\":false,\"message\":\"\"}\r\n```  ")["transmit"].getBool() == false
     for bad in [
-      "```json\n{\"move\":\"N\"}\n```",
+      "Here is my move:\n```json\n{\"move\":\"N\"}\n```",
+      "```json\n{\"move\":\"N\"}\n```\nDone.",
+      "```json\n{\"move\":\"N\"}\n```\n```json\n{\"move\":\"S\"}\n```",
+      "```python\n{\"move\":\"N\"}\n```",
       "Sure! {\"move\":\"S\"} hope that helps",
       "I cannot help with that.",
       "[1, 2, 3]"

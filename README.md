@@ -30,12 +30,16 @@ runner. Prompt, scripted, and trained policies build their own decisions
 and submit complete role actions over the same player websocket. The game
 resolves all four decisions together.
 
-Two bundled **scripted baselines** compute their actions from the private
-observation when explicitly selected via `PLAYER_SCRIPTED` (`lantern`, `wallhug`,
-or `1`). Prompt players require LLM credentials (`COWORLD_LLM_ENDPOINT` or
-`ANTHROPIC_API_KEY`) and fail loudly without them. Missing or invalid actions
-terminate the episode as an explicit `player_error` via
-`COGAME_PLAYER_FAILURE_URI` with no scores — the game never substitutes a move:
+The bundled **model policy** (`lighthouse-player` in `manifest.player`) sets
+`COWORLD_LLM_ENABLED=true` and `COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5`
+so hosted runs route `/bin/lighthouse-player` through the platform LLM sidecar
+(`COWORLD_LLM_ENDPOINT`). Prompt players require `COWORLD_LLM_ENDPOINT` or
+`ANTHROPIC_API_KEY` and fail loudly without them. Two bundled **scripted
+baselines** (`lighthouse-lantern`, `lighthouse-wallhug`) compute their actions
+from the private observation when explicitly selected via `PLAYER_SCRIPTED`
+(`lantern`, `wallhug`, or `1`). Missing or invalid actions terminate the episode
+as an explicit `player_error` via `COGAME_PLAYER_FAILURE_URI` with no scores —
+the game never substitutes a move:
 
 - **`lantern`** (keeper): breadth-first search from the exit and from every
   uncollected key over the unflooded floor, greedy nearest-key assignment,

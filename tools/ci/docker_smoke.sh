@@ -56,8 +56,13 @@ prefix="${slug}-smoke-${run_id}"
 network="${prefix}-net"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/${slug}-smoke.XXXXXX")"
 seats=0
+llm_fixture_pid=""
 
 cleanup() {
+  if [ -n "${llm_fixture_pid}" ]; then
+    kill "${llm_fixture_pid}" >/dev/null 2>&1 || true
+    wait "${llm_fixture_pid}" >/dev/null 2>&1 || true
+  fi
   docker ps -aq --filter "name=${prefix}" | xargs -r docker rm -f >/dev/null 2>&1 || true
   docker network rm "${network}" >/dev/null 2>&1 || true
   rm -rf "${work_dir}"
@@ -152,13 +157,27 @@ with open(os.path.join(work, "config.json"), "w") as fh:
 
 by_id = {p.get("id"): p for p in (manifest.get("player") or [])}
 extra_env = [kv for kv in (os.environ.get("SMOKE_EXTRA_ENV") or "").split() if "=" in kv]
+has_external_llm = any(
+    kv.startswith(("COWORLD_LLM_ENDPOINT=", "ANTHROPIC_API_KEY=", "ANTHROPIC_API_KEY_URI="))
+    for kv in extra_env
+)
+needs_local_llm = False
 
 for slot in range(seats):
     player_id = cert_players[slot].get("player_id") if slot < len(cert_players) else None
     entry = by_id.get(player_id) or {}
+    entry_env = entry.get("env") or {}
+    if "COWORLD_LLM_ENDPOINT" in entry_env:
+        raise SystemExit(
+            f"MANIFEST FAIL: player {player_id!r} must NOT publish COWORLD_LLM_ENDPOINT"
+        )
     env_args = []
-    for key, value in (entry.get("env") or {}).items():
+    for key, value in entry_env.items():
         env_args += ["-e", f"{key}={value}"]
+    if entry_env.get("COWORLD_LLM_ENABLED") == "true" and not has_external_llm:
+        needs_local_llm = True
+        with open(os.path.join(work, f"llm-{slot}.flag"), "w") as fh:
+            fh.write(entry_env.get("COWORLD_LLM_MODEL") or "")
     for kv in extra_env:
         env_args += ["-e", kv]
     argv = list(entry.get("run") or [player_bin])
@@ -168,12 +187,30 @@ for slot in range(seats):
         fh.write(" ".join(shlex.quote(a) for a in argv))
     print(f"slot {slot}: player_id={player_id or '(default)'} run={argv} env={len(env_args) // 2}")
 
+with open(os.path.join(work, "needs_local_llm"), "w") as fh:
+    fh.write("1" if needs_local_llm else "0")
+
 with open(os.path.join(work, "seats"), "w") as fh:
     fh.write(str(seats))
 print(f"game={game.get('name')} seats={seats} config={json.dumps(config)[:400]}")
 PY
 
 seats="$(cat "${work_dir}/seats")"
+needs_local_llm="$(cat "${work_dir}/needs_local_llm")"
+local_llm_url=""
+if [ "${needs_local_llm}" = "1" ]; then
+  python3 "${script_dir}/local_llm_certify.py" --serve-only "${work_dir}/llm_fixture.json" &
+  llm_fixture_pid=$!
+  for _ in $(seq 1 50); do
+    if [ -s "${work_dir}/llm_fixture.json" ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  test -s "${work_dir}/llm_fixture.json" || { echo "FAIL: local LLM fixture failed to start" >&2; exit 1; }
+  local_llm_url="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["docker_internal_url"])' "${work_dir}/llm_fixture.json")"
+  echo "started local LLM fixture at ${local_llm_url}"
+fi
 chmod 777 "${work_dir}"
 
 # --------------------------------------------------------------------------
@@ -196,8 +233,13 @@ docker run -d --name "${prefix}-game" \
 for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
+  extra_docker_args=()
+  if [ -f "${work_dir}/llm-${slot}.flag" ] && [ -n "${local_llm_url}" ]; then
+    extra_docker_args+=(--add-host=host.docker.internal:host-gateway -e "COWORLD_LLM_ENDPOINT=${local_llm_url}")
+  fi
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
+    "${extra_docker_args[@]}" \
     "${penv[@]}" \
     "${image}" "${pcmd[@]}" >/dev/null
 done
@@ -277,6 +319,16 @@ if require_replay_json:
             f"replay is not valid UTF-8 JSON: {exc} "
             "(set SMOKE_REQUIRE_REPLAY_JSON=0 for a binary replay format)"
         ) from exc
+
+if (work / "llm_fixture.json").exists():
+    calls_log = Path(json.loads((work / "llm_fixture.json").read_text())["calls_log"])
+    if not calls_log.exists():
+        raise SystemExit("local LLM fixture received 0 HTTP /v1/messages calls")
+    calls = [json.loads(line) for line in calls_log.read_text().splitlines() if line.strip()]
+    if not calls:
+        raise SystemExit("local LLM fixture received 0 HTTP /v1/messages calls")
+    models = sorted({c.get("model", "") for c in calls})
+    print(f"local LLM fixture verified: {len(calls)} /v1/messages calls (models={models})")
 
 print(
     f"smoke OK: seats={seats} results={results_path.stat().st_size}B "

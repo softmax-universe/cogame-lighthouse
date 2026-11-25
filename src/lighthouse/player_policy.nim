@@ -53,8 +53,13 @@ proc newLlmClient*(model: string, maxOutputTokens, timeoutSeconds: int): LlmClie
   if sidecarEndpoint.len > 0:
     result.transport = ltSidecar
     result.sidecarEndpoint = sidecarEndpoint.strip(chars = {'/'}, leading = false)
-    result.model = getEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5")
+    let envModel = getEnv("COWORLD_LLM_MODEL").strip()
+    result.model =
+      if envModel.len > 0: envModel
+      else: "anthropic/claude-haiku-4.5"
     result.curl = newCurly()
+    echo "lighthouse llm: sidecar transport ", result.sidecarEndpoint,
+      ", model ", result.model
     return
   result.apiKey = resolveApiKey()
   if result.apiKey.len > 0:
@@ -264,11 +269,33 @@ proc promptsFromView*(selection: PromptSelection, view: JsonNode, prompt: string
 
 # ---- Sidecar / Anthropic transport ------------------------------------------
 
-proc parseJsonObject*(text: string): JsonNode =
-  ## Parses a strict JSON object reply without scraping prose or markdown fences.
+proc unwrapSingleMarkdownFence(text: string): string =
+  ## Unwraps at most one top-level Markdown presentation fence (``` or ```json)
+  ## surrounding the entire trimmed reply. Rejects prose outside the fence or
+  ## multiple fences without inventing actions.
   let trimmed = text.strip()
+  if not trimmed.startsWith("```"):
+    return trimmed
+  let firstNewline = trimmed.find('\n')
+  if firstNewline < 0:
+    return trimmed
+  let header = trimmed[3 ..< firstNewline].strip().toLowerAscii()
+  if header.len > 0 and header != "json":
+    return trimmed
+  if not trimmed.endsWith("```"):
+    return trimmed
+  let inner = trimmed[firstNewline + 1 ..< trimmed.len - 3]
+  if "```" in inner:
+    return trimmed
+  inner.strip()
+
+proc parseJsonObject*(text: string): JsonNode =
+  ## Parses a canonical JSON object reply, allowing a single Markdown
+  ## presentation fence without scraping prose or inventing actions.
+  let trimmed = text.strip()
+  let candidate = unwrapSingleMarkdownFence(trimmed)
   try:
-    result = parseJson(trimmed)
+    result = parseJson(candidate)
   except CatchableError as error:
     let head = cleanText(trimmed, 160).replace("\n", " ")
     raise newException(LighthouseError,

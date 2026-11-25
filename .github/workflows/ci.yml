@@ -51,8 +51,9 @@ jobs:
       - name: Certify ordinary roster locally
         run: |
           set -euo pipefail
-          uvx --from 'coworld[auth]==0.1.43' coworld certify \
-            dist/coworld_manifest.json --no-open-report \
+          python3 tools/ci/local_llm_certify.py dist/coworld_manifest.json -- \
+            uvx --from 'coworld[auth]==0.1.43' coworld certify \
+            '{MANIFEST}' --no-open-report \
             --timeout-seconds 300
 
   # ---------------------------------------------------------------------

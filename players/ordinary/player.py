@@ -12,6 +12,22 @@ from policy import baseline, prompts
 from prompt_selection import BANK, PromptSelection
 
 
+def parse_json_object(text: str) -> dict:
+    trimmed = text.strip()
+    candidate = trimmed
+    if trimmed.startswith("```") and trimmed.endswith("```"):
+        newline = trimmed.find("\n")
+        if newline != -1:
+            header = trimmed[3:newline].strip().lower()
+            inner = trimmed[newline + 1 : -3]
+            if header in ("", "json") and "```" not in inner:
+                candidate = inner.strip()
+    action = json.loads(candidate)
+    if not isinstance(action, dict):
+        raise ValueError("trained Lighthouse decision must be a JSON object")
+    return action
+
+
 def choose(turn: dict, generator, selection: PromptSelection) -> tuple[dict, str]:
     view = turn["view"]
     system, user = prompts(selection, view, os.environ.get("PLAYER_PROMPT", ""))
@@ -22,10 +38,7 @@ def choose(turn: dict, generator, selection: PromptSelection) -> tuple[dict, str
                 {"role": "user", "content": user},
             ]
         )
-        action = json.loads(completion)
-        if not isinstance(action, dict):
-            raise ValueError("trained Lighthouse decision must be a JSON object")
-        return action, "trained"
+        return parse_json_object(completion), "trained"
     return baseline(view), "canned"
 
 

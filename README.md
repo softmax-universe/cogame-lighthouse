@@ -31,8 +31,11 @@ and submit complete role actions over the same player websocket. The game
 resolves all four decisions together.
 
 Two bundled **scripted baselines** compute their actions from the private
-observation. A prompt player without model credentials chooses the same
-baseline. The game also uses it if a seat misses its action deadline:
+observation when explicitly selected via `PLAYER_SCRIPTED` (`lantern`, `wallhug`,
+or `1`). Prompt players require LLM credentials (`COWORLD_LLM_ENDPOINT` or
+`ANTHROPIC_API_KEY`) and fail loudly without them. Missing or invalid actions
+terminate the episode as an explicit `player_error` via
+`COGAME_PLAYER_FAILURE_URI` with no scores — the game never substitutes a move:
 
 - **`lantern`** (keeper): breadth-first search from the exit and from every
   uncollected key over the unflooded floor, greedy nearest-key assignment,

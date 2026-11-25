@@ -74,7 +74,6 @@ def main() -> None:
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_API_KEY_URI",
             "COWORLD_LLM_ENDPOINT",
-            "AWS_BEARER_TOKEN_BEDROCK",
         ):
             game_env.pop(key, None)
         game_env.update(
@@ -156,11 +155,11 @@ def main() -> None:
             )
             assert (work / "ordinary.zip").stat().st_mode & 0o777 == 0o600
             game_text = (work / "game.log").read_text()
-            assert "using scripted fallback" not in game_text
+            assert "player failure on slot" not in game_text
             prompt = [call for call in ModelStub.calls if call[0] == "/v1/messages"]
             assert len(prompt) == 6 and all(slot == "1" for _, slot in prompt)
             print(
-                "mixed episode: 6 canned, 6 prompt, 12 scripted decisions; zero game fallback"
+                "mixed episode: 6 canned, 6 prompt, 12 scripted decisions; zero player failures"
             )
         finally:
             for process in processes:
@@ -172,5 +171,110 @@ def main() -> None:
             stub.shutdown()
 
 
+def verify_invalid_action_fails_terminally(game_bin: Path, player_bin: Path) -> None:
+    """An invalid player action must terminate with player_failure.json and no scores."""
+    import websocket
+
+    game_port = free_port()
+    with tempfile.TemporaryDirectory(prefix="lighthouse-fail-") as temp:
+        work = Path(temp)
+        config = {
+            "seed": 7,
+            "maxTicks": 6,
+            "turnDelayMs": 0,
+            "decisionTimeoutSeconds": 5,
+            "player_connect_timeout_seconds": 15,
+            "episodeTimeoutSeconds": 120,
+            "players": [{"name": f"P{seat}"} for seat in range(4)],
+            "tokens": [f"t{seat}" for seat in range(4)],
+        }
+        (work / "config.json").write_text(json.dumps(config))
+        game_env = os.environ.copy()
+        game_env.update(
+            {
+                "COGAME_HOST": "127.0.0.1",
+                "COGAME_PORT": str(game_port),
+                "COGAME_CONFIG_URI": (work / "config.json").as_uri(),
+                "COGAME_RESULTS_URI": (work / "results.json").as_uri(),
+                "COGAME_SAVE_REPLAY_URI": (work / "replay.json").as_uri(),
+                "COGAME_PLAYER_FAILURE_URI": (work / "player_failure.json").as_uri(),
+            }
+        )
+        processes = []
+        logs = []
+        try:
+            game_log = (work / "game.log").open("w+")
+            logs.append(game_log)
+            game = subprocess.Popen(
+                [str(game_bin)], env=game_env, stdout=game_log, stderr=subprocess.STDOUT
+            )
+            processes.append(game)
+            for _ in range(100):
+                if game.poll() is not None:
+                    raise RuntimeError("game exited before healthz")
+                with socket.socket() as probe:
+                    probe.settimeout(0.2)
+                    ready = probe.connect_ex(("127.0.0.1", game_port)) == 0
+                if ready:
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{game_port}/healthz", timeout=0.2
+                    )
+                    break
+                time.sleep(0.05)
+            else:
+                raise RuntimeError("game healthz did not start")
+            for seat in (0, 2, 3):
+                env = game_env.copy()
+                env["COWORLD_PLAYER_WS_URL"] = (
+                    f"ws://127.0.0.1:{game_port}/player?slot={seat}&token=t{seat}"
+                )
+                env["PLAYER_SCRIPTED"] = "1"
+                handle = (work / f"player-{seat}.log").open("w+")
+                logs.append(handle)
+                processes.append(
+                    subprocess.Popen(
+                        [str(player_bin)],
+                        env=env,
+                        stdout=handle,
+                        stderr=subprocess.STDOUT,
+                    )
+                )
+            bad_ws = websocket.create_connection(
+                f"ws://127.0.0.1:{game_port}/player?slot=1&token=t1", timeout=10
+            )
+            try:
+                while True:
+                    frame = json.loads(bad_ws.recv())
+                    if frame.get("type") == "turn":
+                        bad_ws.send(
+                            json.dumps(
+                                {
+                                    "type": "decision",
+                                    "tick": frame["tick"],
+                                    "source": "player",
+                                    "action": {"move": "north", "notes": ""},
+                                }
+                            )
+                        )
+                        break
+            finally:
+                bad_ws.close()
+            assert game.wait(timeout=15) != 0
+            assert not (work / "results.json").exists()
+            failure = json.loads((work / "player_failure.json").read_text())
+            assert failure["kind"] == "player_error"
+            assert failure["failed_policy_index"] == 1
+            assert "not a move token: north" in failure["message"]
+            print("terminal failure check: invalid alias rejected with player_error and no scores")
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+            for handle in logs:
+                handle.close()
+
+
 if __name__ == "__main__":
     main()
+    verify_invalid_action_fails_terminally(*map(Path, sys.argv[1:3]))

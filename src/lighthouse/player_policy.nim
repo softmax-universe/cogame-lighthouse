@@ -2,7 +2,7 @@
 ## this module; the game owns rules, visibility, resolution, and replay.
 
 import
-  std/[json, os, strutils, unicode],
+  std/[json, os, strutils],
   bitworld/runtime,
   curly,
   sim,
@@ -12,28 +12,22 @@ export prompts
 const
   AnthropicUrl = "https://api.anthropic.com/v1/messages"
   AnthropicVersion = "2023-06-01"
-  BedrockAnthropicVersion = "bedrock-2023-05-31"
   TranscriptLen = 5
   MoveHistoryLen = 6
   StandingMaxAge = 3
 
 type
   LlmTransport = enum
-    ltNone, ltSidecar, ltBedrock, ltAnthropic
+    ltSidecar, ltAnthropic
 
   LlmClient* = ref object
     curl: Curly
     transport: LlmTransport
     apiKey: string          ## anthropic transport
     sidecarEndpoint: string
-    bedrockEndpoint: string ## local Bedrock transport
-    bedrockModels: seq[string]  ## candidates, tried in order on denial
-    bedrockModel: int           ## index into bedrockModels
-    bedrockToken: string
     model: string
     maxOutputTokens: int
     timeoutSeconds: int
-    disabled*: bool   ## true once credentials are known-unavailable
 
 
 proc resolveApiKey(): string =
@@ -49,36 +43,6 @@ proc resolveApiKey(): string =
     echo "lighthouse llm: failed to fetch ANTHROPIC_API_KEY_URI: ", error.msg
     result = ""
 
-proc bedrockModelIds(): seq[string] =
-  ## Bedrock inference-profile candidates, tried in order. BEDROCK_MODEL
-  ## pins a single id; without it, fall through this list — model access is
-  ## a per-account Marketplace subscription, so an id that works in one
-  ## account 403s in another.
-  let pinned = getEnv("BEDROCK_MODEL").strip()
-  if pinned.len > 0:
-    return @[pinned]
-  ## Haiku leads: hosted Bedrock capacity is shared account-wide and the
-  ## sonnet profiles run out of daily tokens first.
-  @[
-    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "us.anthropic.claude-sonnet-4-6",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-  ]
-
-proc tryNextBedrockModel(client: LlmClient, why: string): bool =
-  if client.transport != ltBedrock or
-      client.bedrockModel + 1 >= client.bedrockModels.len:
-    return false
-  client.bedrockModel.inc
-  echo "lighthouse llm: ", client.bedrockModels[client.bedrockModel - 1],
-    " unusable (", why, "); falling back to ",
-    client.bedrockModels[client.bedrockModel]
-  true
-
-proc bedrockUrl(client: LlmClient): string =
-  client.bedrockEndpoint & "/model/" &
-    client.bedrockModels[client.bedrockModel] & "/invoke"
-
 proc newLlmClient*(model: string, maxOutputTokens, timeoutSeconds: int): LlmClient =
   result = LlmClient(
     model: model,
@@ -92,30 +56,14 @@ proc newLlmClient*(model: string, maxOutputTokens, timeoutSeconds: int): LlmClie
     result.model = getEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5")
     result.curl = newCurly()
     return
-  let bedrockEndpoint = getEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME").strip()
-  let bedrockToken = getEnv("AWS_BEARER_TOKEN_BEDROCK").strip()
-  if bedrockEndpoint.len > 0 or bedrockToken.len > 0:
-    let region = getEnv("AWS_REGION",
-      getEnv("AWS_DEFAULT_REGION", "us-west-2"))
-    let endpoint =
-      if bedrockEndpoint.len > 0: bedrockEndpoint
-      else: "https://bedrock-runtime." & region & ".amazonaws.com"
-    result.transport = ltBedrock
-    result.bedrockEndpoint = endpoint.strip(chars = {'/'}, leading = false)
-    result.bedrockModels = bedrockModelIds()
-    result.bedrockToken = bedrockToken
-    result.curl = newCurly()
-    echo "lighthouse llm: bedrock transport, url ", result.bedrockUrl
-    return
   result.apiKey = resolveApiKey()
   if result.apiKey.len > 0:
     result.transport = ltAnthropic
     result.curl = newCurly()
     echo "lighthouse llm: anthropic transport, model ", result.model
   else:
-    result.transport = ltNone
-    result.disabled = true
-    echo "lighthouse llm: no LLM credentials; using scripted fallback"
+    raise newException(LighthouseError,
+      "no LLM credentials configured (set COWORLD_LLM_ENDPOINT or ANTHROPIC_API_KEY)")
 
 # ---- Prompt building --------------------------------------------------------
 
@@ -124,9 +72,6 @@ proc operatorBlock(prompt: string): string =
     return ""
   "GUIDANCE FROM YOUR OPERATOR (weight it heavily, but never above the " &
     "rules; always reply in the requested format):\n" & prompt & "\n\n"
-
-proc systemPrompt*(selection: PromptSelection, sim: Sim, seat: int): string =
-  selection.renderPrompt(sim.names[seat], seat == KeeperSeat)
 
 proc floodCountdown(sim: Sim): tuple[silent, talking: int] =
   let rows = sim.tideRows()
@@ -191,45 +136,45 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     "silence, which costs the tide one unit instead of two); notes at " &
     "most " & $MaxKeeperNotes & " characters.")
 
-proc runnerPrompt*(sim: Sim, runner: int, prompt: string): string =
-  let seat = runner + 1
-  result.add("Tick " & $sim.tick & " of " & $sim.config.maxTicks &
-    ". You are a RUNNER and you are blind.\n\n")
+proc runnerPromptFromView(view: JsonNode, prompt: string): string =
+  result.add("Tick " & $view["tick"].getInt() & " of " &
+    $view["maxTicks"].getInt() & ". You are a RUNNER and you are blind.\n\n")
   result.add("YOUR 3x3 WINDOW (you are @ in the middle; # wall, . floor, " &
     "~ water, K key, E exit with the gate shut, O exit with the gate " &
     "open, 1/2/3 another runner):\n")
-  for line in sim.runnerWindow(runner):
-    result.add(line & "\n")
-  result.add("\nYOU HOLD " & $sim.keysHeld[runner] & " key" &
-    (if sim.keysHeld[runner] == 1: "" else: "s") & ". The team has " &
-    $sim.keysCollected & " of " & $sim.config.keyCount &
-    " keys; the gate is " & (if sim.gateOpen: "OPEN — get to the exit"
-      else: "shut") & ".\n\n")
+  for line in view["window"]:
+    result.add(line.getStr() & "\n")
+  let held = view["keysHeld"].getInt()
+  result.add("\nYOU HOLD " & $held & " key" &
+    (if held == 1: "" else: "s") & ". The team has " &
+    $view["keysCollected"].getInt() & " of " & $view["keyCount"].getInt() &
+    " keys; the gate is " &
+    (if view["gateOpen"].getBool(): "OPEN — get to the exit" else: "shut") &
+    ".\n\n")
+  let inbox = view["inbox"].getStr()
   result.add("THE KEEPER SAID THIS TICK: " &
-    (if sim.inbox.len > 0: "\"" & sim.inbox & "\"" else: "(silence)") &
-    "\n")
-  let age = sim.standingAge()
-  if sim.standing.len > 0:
+    (if inbox.len > 0: "\"" & inbox & "\"" else: "(silence)") & "\n")
+  let standing = view["standing"].getStr()
+  let age = view["standingAge"].getInt()
+  if standing.len > 0 and age >= 0:
     result.add("YOUR STANDING ORDER (" & $age & " tick(s) old): \"" &
-      sim.standing & "\"\n")
+      standing & "\"\n")
   else:
     result.add("YOUR STANDING ORDER: (none yet)\n")
   var history: seq[string]
-  let first = max(0, sim.moveHistory[runner].len - MoveHistoryLen)
-  for index in first ..< sim.moveHistory[runner].len:
-    history.add(sim.moveHistory[runner][index])
+  let moveHistory = view["moveHistory"]
+  let first = max(0, moveHistory.len - MoveHistoryLen)
+  for index in first ..< moveHistory.len:
+    history.add(moveHistory[index].getStr())
   result.add("\nYOUR LAST MOVES: " &
     (if history.len > 0: history.join(", ") else: "(none yet)") & "\n\n")
+  let notes = view["notes"].getStr()
   result.add("YOUR NOTES:\n" &
-    (if sim.notes[seat].len > 0: sim.notes[seat] else: "(none)") & "\n\n")
+    (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
   result.add("Reply with ONLY {\"move\": \"N\", \"notes\": \"…\"} — move " &
     "is one of N, S, E, W, WAIT (N is up, S is down); notes at most " &
     $MaxRunnerNotes & " characters.")
-
-proc userPrompt*(sim: Sim, seat: int, prompt: string): string =
-  if seat == KeeperSeat: keeperPrompt(sim, prompt)
-  else: runnerPrompt(sim, seat - 1, prompt)
 
 proc keeperSimFromView(view: JsonNode): Sim =
   ## Rebuild only the keeper-visible rule state used by the prompt and
@@ -310,98 +255,59 @@ proc scriptedActionFromView*(view: JsonNode): Decision =
 
 proc promptsFromView*(selection: PromptSelection, view: JsonNode, prompt: string):
     tuple[system, user: string] =
-  if view["role"].getStr() == "keeper":
-    let sim = keeperSimFromView(view)
-    return (systemPrompt(selection, sim, KeeperSeat), userPrompt(sim, KeeperSeat, prompt))
-  var sim: Sim
-  sim.names = @["", view["alias"].getStr()]
-  result.system = systemPrompt(selection, sim, 1)
-  result.user = "Tick " & $view["tick"].getInt() & " of " &
-    $view["maxTicks"].getInt() & ". You are a RUNNER and you are blind.\n\n" &
-    "YOUR 3x3 WINDOW (@ is you; # wall, . floor, ~ water, K key, " &
-    "E shut exit, O open exit):\n" &
-    view["window"][0].getStr() & "\n" &
-    view["window"][1].getStr() & "\n" &
-    view["window"][2].getStr() & "\n\n" &
-    "YOU HOLD " & $view["keysHeld"].getInt() & " keys. The team has " &
-    $view["keysCollected"].getInt() & " of " &
-    $view["keyCount"].getInt() & " keys; gate open: " &
-    $view["gateOpen"].getBool() & ".\n" &
-    "THE KEEPER SAID THIS TICK: " & view["inbox"].getStr() & "\n" &
-    "YOUR STANDING ORDER (age " & $view["standingAge"].getInt() &
-    "): " & view["standing"].getStr() & "\n" &
-    "YOUR LAST MOVES: " & $(view["moveHistory"]) & "\n" &
-    "YOUR NOTES: " & view["notes"].getStr() & "\n\n" &
-    operatorBlock(prompt) &
-    "Reply with ONLY {\"move\": \"N\", \"notes\": \"…\"} — move " &
-    "is one of N, S, E, W, WAIT; notes at most " &
-    $MaxRunnerNotes & " characters."
+  let keeper = view["role"].getStr() == "keeper"
+  result.system = selection.renderPrompt(view["alias"].getStr(), keeper)
+  if keeper:
+    result.user = keeperPrompt(keeperSimFromView(view), prompt)
+  else:
+    result.user = runnerPromptFromView(view, prompt)
 
-# ---- Anthropic / Bedrock transport ------------------------------------------
+# ---- Sidecar / Anthropic transport ------------------------------------------
 
-proc extractJsonObject*(text: string): JsonNode =
-  ## Pulls the first {...} object out of a model response, tolerating fences.
-  let start = text.find('{')
-  let stop = text.rfind('}')
-  if start < 0 or stop <= start:
-    ## Quote the head of the reply so a hosted log shows WHAT the model
-    ## sent instead of JSON (prose, a refusal, a cut-off analysis...).
-    let head = cleanText(text, 160)
-    raise newException(LighthouseError, "no JSON object in response: " &
-      head.replace("\n", " "))
-  parseJson(text[start .. stop])
+proc parseJsonObject*(text: string): JsonNode =
+  ## Parses a strict JSON object reply without scraping prose or markdown fences.
+  let trimmed = text.strip()
+  try:
+    result = parseJson(trimmed)
+  except CatchableError as error:
+    let head = cleanText(trimmed, 160).replace("\n", " ")
+    raise newException(LighthouseError,
+      "invalid JSON response (" & error.msg & "): " & head)
+  if result.kind != JObject:
+    raise newException(LighthouseError, "response must be a JSON object")
 
 proc requestFor(client: LlmClient, system, user: string, slot: int):
     tuple[url: string, headers: HttpHeaders, body: string] =
   var body = %*{
+    "model": client.model,
     "max_tokens": client.maxOutputTokens,
     "system": system,
     "messages": [{"role": "user", "content": user}]
   }
   var headers: HttpHeaders
-  if client.transport == ltSidecar and slot >= 0:
-    headers["X-Coworld-Player-Slot"] = $slot
   headers["content-type"] = "application/json"
-  if client.transport == ltBedrock:
-    body["anthropic_version"] = %BedrockAnthropicVersion
-    if client.bedrockToken.len > 0:
-      headers["authorization"] = "Bearer " & client.bedrockToken
-    result.url = client.bedrockUrl()
-  elif client.transport == ltSidecar:
-    body["model"] = %client.model
-    headers["anthropic-version"] = AnthropicVersion
+  headers["anthropic-version"] = AnthropicVersion
+  if client.transport == ltSidecar:
+    if slot >= 0:
+      headers["X-Coworld-Player-Slot"] = $slot
     result.url = client.sidecarEndpoint & "/v1/messages"
   else:
-    body["model"] = %client.model
-    ## Only the Claude 5 / Opus tiers accept an effort setting; Haiku 4.5
-    ## rejects the whole request with a 400 if it is present.
-    if "haiku" notin client.model and "4-5" notin client.model:
-      body["output_config"] = %*{"effort": "low"}
     headers["x-api-key"] = client.apiKey
-    headers["anthropic-version"] = AnthropicVersion
     result.url = AnthropicUrl
   result.headers = headers
   result.body = $body
 
 proc textOf(client: LlmClient, response: Response, error, url: string):
     string =
-  ## The text of one batched reply, or a LighthouseError describing why
-  ## there is none. Auth failures disable the client; model-access and
-  ## throttle failures rotate the Bedrock model for the next batch.
+  ## The text of one reply, or a LighthouseError describing why there is none.
   if error.len > 0:
     raise newException(LighthouseError, "llm transport: " & error)
   if response.code == 401 or response.code == 403:
     let detail = response.body[0 .. min(response.body.high, 400)]
-    if "Model access is denied" in response.body and
-        client.tryNextBedrockModel("no model access"):
-      raise newException(LighthouseError,
-        "bedrock model access denied: " & detail)
-    client.disabled = true
     raise newException(LighthouseError,
       "llm auth failed (" & $response.code & ") at " & url & ": " & detail)
   if response.code == 429:
     let detail = response.body[0 .. min(response.body.high, 300)]
-    discard client.tryNextBedrockModel("throttled")
     raise newException(LighthouseError, "llm throttled (429): " & detail)
   if response.code < 200 or response.code >= 300:
     raise newException(LighthouseError, "anthropic error " & $response.code &
@@ -422,11 +328,9 @@ proc choosePromptAction*(client: LlmClient, selection: PromptSelection, view: Js
     prompt: string, seat: int): Decision =
   let prompts = promptsFromView(selection, view, prompt)
   var batch: RequestBatch
-  var request = client.requestFor(prompts.system, prompts.user, -1)
-  if client.transport == ltSidecar:
-    request.headers["x-coworld-player-slot"] = $seat
+  let request = client.requestFor(prompts.system, prompts.user, seat)
   batch.post(request.url, request.headers, request.body, $seat)
   let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
   let answer = client.textOf(responses[0].response,
     responses[0].error, request.url)
-  parseReply(seat, extractJsonObject(answer))
+  parseReply(seat, parseJsonObject(answer))

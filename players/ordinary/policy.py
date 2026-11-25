@@ -44,17 +44,8 @@ def _order(text: str, alias: str) -> str | None:
         return None
     token = match.group(1).upper()
     return {
-        "NORTH": "N",
-        "UP": "N",
-        "SOUTH": "S",
-        "DOWN": "S",
-        "EAST": "E",
-        "RIGHT": "E",
-        "WEST": "W",
-        "LEFT": "W",
         "H": "WAIT",
         "HOLD": "WAIT",
-        "STAY": "WAIT",
     }.get(token, token if token in (*DIRECTIONS, "WAIT") else None)
 
 

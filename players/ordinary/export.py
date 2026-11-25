@@ -44,7 +44,7 @@ def export(
                 raise ValueError(f"duplicate training capture {artifact}")
             episode_ids.add(episode_id)
             if (
-                trajectory["schema_version"] not in (1, 2)
+                trajectory["schema_version"] != 1
                 or trajectory["game"] != "lighthouse"
                 or trajectory["slot"] != slot
                 or trajectory["source_revision"] != revision
@@ -54,19 +54,18 @@ def export(
             ):
                 raise ValueError(f"invalid training artifact {artifact}")
             for row in trajectory["decisions"]:
-                if "prompt_template" in row:
-                    metadata = row["prompt_template"]
-                    selection = PromptSelection.model_validate(
-                        {
-                            key: metadata[key]
-                            for key in ("bank", "variant", "selection", "seed")
-                        }
-                    )
-                    if selection.variant.startswith("heldout-"):
-                        raise ValueError("held-out wording cannot enter training")
-                    system, user = (message["content"] for message in row["prompt"])
-                    if selection.metadata(system, user) != metadata:
-                        raise ValueError("captured prompt hashes differ")
+                metadata = row["prompt_template"]
+                selection = PromptSelection.model_validate(
+                    {
+                        key: metadata[key]
+                        for key in ("bank", "variant", "selection", "seed")
+                    }
+                )
+                if selection.variant.startswith("heldout-"):
+                    raise ValueError("held-out wording cannot enter training")
+                system, user = (message["content"] for message in row["prompt"])
+                if selection.metadata(system, user) != metadata:
+                    raise ValueError("captured prompt hashes differ")
                 if row["source"] != source:
                     continue
                 example = {
@@ -77,9 +76,8 @@ def export(
                     "completion": row["completion"],
                     "game": "lighthouse",
                     "action_schema_revision": "lighthouse-reply-v1",
+                    "prompt_template": metadata,
                 }
-                if "prompt_template" in row:
-                    example["prompt_template"] = row["prompt_template"]
                 splits[split].append(json.dumps(example, ensure_ascii=False))
                 count += 1
         if count == 0:

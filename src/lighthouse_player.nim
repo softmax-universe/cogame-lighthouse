@@ -73,13 +73,12 @@ when isMainModule:
       else:
         episodeSelection = some(selection)
       let view = payload["view"]
-      let fallback = scripted or client.disabled
       let decision =
-        if fallback: scriptedActionFromView(view)
+        if scripted: scriptedActionFromView(view)
         else: choosePromptAction(client, selection, view, prompt, slot)
       socket.send($ %*{
         "type": "decision", "tick": payload["tick"],
-        "source": (if fallback: "scripted" else: "player"),
+        "source": (if scripted: "scripted" else: "player"),
         "action": decisionJson(slot, decision)
       })
     of "decision_result":

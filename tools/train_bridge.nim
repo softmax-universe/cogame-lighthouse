@@ -111,7 +111,7 @@ proc step(command: JsonNode): JsonNode =
   let seat = seats[cursor]
   var action: JsonNode
   if languageMode:
-    decisions[seat] = parseReply(seat, extractJsonObject(command["response"].getStr()))
+    decisions[seat] = parseReply(seat, parseJsonObject(command["response"].getStr()))
     action = decisionJson(seat, decisions[seat])
   else:
     action = parseJson(command["response"].getStr())

@@ -4,7 +4,7 @@
 ## `lantern` + three `wallhug` must also be a competent, watchable filler
 ## team, or a champion prompt has nothing to beat.
 
-import std/[json, monotimes, times, unicode, unittest]
+import std/[json, monotimes, os, times, unicode, unittest]
 import lighthouse/[rules, player_policy, sim]
 
 const Seeds = [1, 7, 42, 1234]
@@ -168,10 +168,10 @@ suite "role substitution":
     check parseScriptKind("lantern") == skLantern
     check parseScriptKind("wallhug") == skWallhug
     check parseScriptKind("1") == skAuto
-    check parseScriptKind("true") == skAuto
-    check parseScriptKind("yes") == skAuto
     check parseScriptKind("") == skNone
     check parseScriptKind("nonsense") == skNone
+    check parseScriptKind("true") == skNone
+    check parseScriptKind("keeper") == skNone
     ## And the decisions really are the other baseline's shape.
     let sim = initSim(fixture(7))
     let keeperSeatAsWallhug = scriptedAction(sim, KeeperSeat, skWallhug)
@@ -181,31 +181,47 @@ suite "role substitution":
     check runnerSeatAsLantern.message.len == 0
 
 suite "no credentials":
-  test "a credential-free prompt player selects the scripted policy":
-    let client = newLlmClient("claude-sonnet-5", 900, 18)
-    check client.disabled
+  test "a credential-free prompt player fails loudly instead of falling back":
+    let savedEndpoint = getEnv("COWORLD_LLM_ENDPOINT")
+    let savedKey = getEnv("ANTHROPIC_API_KEY")
+    let savedKeyUri = getEnv("ANTHROPIC_API_KEY_URI")
+    defer:
+      if savedEndpoint.len > 0: putEnv("COWORLD_LLM_ENDPOINT", savedEndpoint)
+      else: delEnv("COWORLD_LLM_ENDPOINT")
+      if savedKey.len > 0: putEnv("ANTHROPIC_API_KEY", savedKey)
+      else: delEnv("ANTHROPIC_API_KEY")
+      if savedKeyUri.len > 0: putEnv("ANTHROPIC_API_KEY_URI", savedKeyUri)
+      else: delEnv("ANTHROPIC_API_KEY_URI")
+    delEnv("COWORLD_LLM_ENDPOINT")
+    delEnv("ANTHROPIC_API_KEY")
+    delEnv("ANTHROPIC_API_KEY_URI")
+    expect LighthouseError:
+      discard newLlmClient("claude-sonnet-5", 900, 18)
 
 suite "reply parsing":
-  test "runner moves parse tolerantly and reject anything else":
-    check parseRunnerReply(parseJson("""{"move":"north"}""")).move == mvNorth
-    check parseRunnerReply(parseJson("""{"move":"n"}""")).move == mvNorth
+  test "runner moves require canonical tokens and reject aliases or junk":
+    check parseRunnerReply(parseJson("""{"move":"N"}""")).move == mvNorth
     check parseRunnerReply(parseJson("""{"move":" E "}""")).move == mvEast
+    check parseRunnerReply(parseJson("""{"move":"S","notes":"x"}""")).notes == "x"
+    check parseRunnerReply(parseJson("""{"move":"W"}""")).move == mvWest
     check parseRunnerReply(parseJson("""{"move":"WAIT"}""")).move == mvWait
-    check parseRunnerReply(parseJson("""{"move":"left"}""")).move == mvWest
-    check parseRunnerReply(parseJson("""{"move":"Down"}""")).move == mvSouth
-    check parseRunnerReply(parseJson("""{"move":"hold"}""")).move == mvWait
-    check parseRunnerReply(
-      parseJson("""{"move":"S","notes":"x"}""")).notes == "x"
-    expect LighthouseError:
-      discard parseRunnerReply(parseJson("""{"move":"NE"}"""))
-    expect LighthouseError:
-      discard parseRunnerReply(parseJson("""{"move":42}"""))
-    expect LighthouseError:
-      discard parseRunnerReply(parseJson("""{}"""))
-    expect LighthouseError:
-      discard parseRunnerReply(parseJson("""{"notes":"no move"}"""))
+    for bad in [
+      """{"move":"north"}""",
+      """{"move":"n"}""",
+      """{"move":"left"}""",
+      """{"move":"Down"}""",
+      """{"move":"hold"}""",
+      """{"move":"H"}""",
+      """{"move":"NE"}""",
+      """{"move":42}""",
+      """{}""",
+      """{"notes":"no move"}""",
+      """{"move":"N","notes":123}"""
+    ]:
+      expect LighthouseError:
+        discard parseRunnerReply(parseJson(bad))
 
-  test "keeper replies infer transmit and treat blank as silence":
+  test "keeper replies require boolean transmit and string message":
     let plain = parseKeeperReply(
       parseJson("""{"transmit":true,"message":"Sprocket N"}"""))
     check plain.transmit
@@ -214,28 +230,44 @@ suite "reply parsing":
       parseJson("""{"transmit":true,"message":"   "}"""))
     check not blank.transmit
     check blank.message == ""
-    let inferred = parseKeeperReply(parseJson("""{"message":"go N"}"""))
-    check inferred.transmit
-    check inferred.message == "go N"
     let hushed = parseKeeperReply(
       parseJson("""{"transmit":false,"message":"quiet"}"""))
     check not hushed.transmit
+    check hushed.message == ""
+    let silentNoMsg = parseKeeperReply(
+      parseJson("""{"transmit":false,"notes":"watching"}"""))
+    check not silentNoMsg.transmit
+    check silentNoMsg.message == ""
+    check silentNoMsg.notes == "watching"
     ## Newlines collapse before the rune-boundary truncation: one run of
     ## newline characters becomes ONE space, CRLF and blank lines included.
     let folded = parseKeeperReply(
-      parseJson("""{"message":"one\ntwo","notes":"n"}"""))
+      parseJson("""{"transmit":true,"message":"one\ntwo","notes":"n"}"""))
     check folded.message == "one two"
     check folded.notes == "n"
     let crlf = parseKeeperReply(
-      parseJson("""{"message":"a\r\n\nb\n\nc"}"""))
+      parseJson("""{"transmit":true,"message":"a\r\n\nb\n\nc"}"""))
     check crlf.message == "a b c"
-    expect LighthouseError:
-      discard parseKeeperReply(parseJson("""{"order":3}"""))
+    for bad in [
+      """{"message":"go N"}""",
+      """{"transmit":"true","message":"go N"}""",
+      """{"transmit":1,"message":"go N"}""",
+      """{"transmit":true}""",
+      """{"transmit":true,"message":42}""",
+      """{"transmit":false,"notes":7}""",
+      """{"order":3}"""
+    ]:
+      expect LighthouseError:
+        discard parseKeeperReply(parseJson(bad))
 
-  test "the transport tolerates fenced and chatty JSON":
-    check extractJsonObject("```json\n{\"move\":\"N\"}\n```"){
-      "move"}.getStr() == "N"
-    check extractJsonObject("Sure! {\"move\":\"S\"} hope that helps"){
-      "move"}.getStr() == "S"
-    expect LighthouseError:
-      discard extractJsonObject("I cannot help with that.")
+  test "the transport requires strict JSON objects":
+    check parseJsonObject("""{"move":"N"}""")["move"].getStr() == "N"
+    check parseJsonObject("  {\"move\":\"S\"} \n")["move"].getStr() == "S"
+    for bad in [
+      "```json\n{\"move\":\"N\"}\n```",
+      "Sure! {\"move\":\"S\"} hope that helps",
+      "I cannot help with that.",
+      "[1, 2, 3]"
+    ]:
+      expect LighthouseError:
+        discard parseJsonObject(bad)

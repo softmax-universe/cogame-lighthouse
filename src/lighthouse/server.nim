@@ -42,6 +42,8 @@ type
     sim: Sim
     pendingTick: int
     pendingDecisions: Table[int, Decision]
+    failedSlot: int
+    failureMessage: string
     playerSockets: Table[int, WebSocket]
     socketSlots: Table[WebSocket, int]
     globalSockets: HashSet[WebSocket]
@@ -197,6 +199,37 @@ proc statesFromEvents*(config: GameConfig, events: seq[GameEvent],
   for frame in replayMatch(config, events, recorded):
     result.add(frame.boardStateJson())
 
+proc failEpisode(slot: int, message: string) =
+  let detail = cleanText(message, 2000)
+  var notifyTick = -1
+  withLock stateLock:
+    if state.finished:
+      return
+    state.finished = true
+    notifyTick = state.pendingTick
+    state.pendingTick = -1
+    if notifyTick >= 0 and state.playerSockets.hasKey(slot):
+      state.playerSockets[slot].send($ %*{
+        "type": "decision_result",
+        "tick": notifyTick,
+        "accepted": false,
+        "error": detail
+      })
+  echo "lighthouse: player failure on slot ", slot, ": ", detail
+  let failureUri = getEnv("COGAME_PLAYER_FAILURE_URI").strip()
+  if failureUri.len > 0:
+    let payload = %*{
+      "message": detail,
+      "failed_policy_index": slot,
+      "kind": "player_error"
+    }
+    writeArtifact(
+      failureUri, $payload, "application/json",
+      "COGAME_PLAYER_FAILURE_METHOD"
+    )
+  sleep(200)
+  quit(1)
+
 proc finishEpisode(runtimeConfig: RuntimeConfig) =
   var results: JsonNode
   var replayData: string
@@ -265,11 +298,21 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
         break
       sleep(200)
 
+    var missingSlot = -1
     withLock stateLock:
-      state.started = true
-      echo "lighthouse: starting with ", state.playerSockets.len, "/",
-        config.tokens.len, " players connected"
-      state.broadcastLocked()
+      for slot in 0 ..< config.tokens.len:
+        if not state.playerSockets.hasKey(slot):
+          missingSlot = slot
+          break
+      if missingSlot < 0:
+        state.started = true
+        echo "lighthouse: starting with ", state.playerSockets.len, "/",
+          config.tokens.len, " players connected"
+        state.broadcastLocked()
+    if missingSlot >= 0:
+      failEpisode(missingSlot,
+        "seat " & $missingSlot & " did not connect within " &
+        $config.playerConnectTimeoutSeconds & "s")
 
     ## The platform kills the episode at its timeout and keeps nothing.
     ## Play inside a fraction of it so results and the replay are written
@@ -327,23 +370,35 @@ proc runGame(runtimeConfig: RuntimeConfig) {.gcsafe.} =
             })
       while epochTime() < decisionDeadline:
         var received = 0
+        var failed = false
         withLock stateLock:
+          failed = state.failedSlot >= 0
           for seat in seats:
             if state.pendingDecisions.hasKey(seat):
               received.inc
-        if received == seats.len:
+        if failed or received == seats.len:
           break
         sleep(20)
       var decisions = newSeq[Decision](seats.len)
+      var failedSlot = -1
+      var failureMessage = ""
       withLock stateLock:
-        for index, seat in seats:
-          if state.pendingDecisions.hasKey(seat):
-            decisions[index] = state.pendingDecisions[seat]
-          else:
-            echo "lighthouse: seat ", seat,
-              " using scripted fallback"
-            decisions[index] = scriptedAction(simCopy, seat, skAuto)
-        state.pendingTick = -1
+        if state.failedSlot >= 0:
+          failedSlot = state.failedSlot
+          failureMessage = state.failureMessage
+        else:
+          for index, seat in seats:
+            if state.pendingDecisions.hasKey(seat):
+              decisions[index] = state.pendingDecisions[seat]
+            else:
+              failedSlot = seat
+              failureMessage = "seat " & $seat & " (" & simCopy.names[seat] &
+                ") missed decision deadline on tick " & $simCopy.tick
+              break
+        if failedSlot < 0:
+          state.pendingTick = -1
+      if failedSlot >= 0:
+        failEpisode(failedSlot, failureMessage)
 
       withLock stateLock:
         var spoke = false
@@ -518,7 +573,14 @@ proc websocketHandler(
               decision.scripted = payload{"source"}.getStr() == "scripted"
               state.pendingDecisions[slot] = decision
       except CatchableError as error:
-        echo "lighthouse: ignoring bad player frame: ", error.msg
+        let rawHead = cleanText(message.data, 200).replace("\n", " ")
+        let detail = "seat " & $slot & " sent invalid decision: " & error.msg &
+          " (payload: " & rawHead & ")"
+        echo "lighthouse: ", detail
+        withLock stateLock:
+          if state.failedSlot < 0:
+            state.failedSlot = slot
+            state.failureMessage = detail
     of ErrorEvent:
       discard
     of CloseEvent:
@@ -597,6 +659,8 @@ proc runGameServer*(config: GameConfig, runtimeConfig: RuntimeConfig) =
   state.sim = initSim(config)
   state.pendingTick = -1
   state.pendingDecisions = initTable[int, Decision]()
+  state.failedSlot = -1
+  state.failureMessage = ""
   runtimeConfigGlobal = runtimeConfig
 
   let router = buildRouter(replayMode = false)

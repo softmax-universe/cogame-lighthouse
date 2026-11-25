@@ -222,8 +222,8 @@ if [ "${exit_code}" != "0" ]; then
   dump_logs
   exit 1
 fi
-if docker logs "${prefix}-game" 2>&1 | grep -q "using scripted fallback"; then
-  echo "FAIL: a bundled player missed its ordinary decision deadline" >&2
+if docker logs "${prefix}-game" 2>&1 | grep -q "player failure on slot"; then
+  echo "FAIL: a bundled player triggered a terminal player failure" >&2
   dump_logs
   exit 1
 fi

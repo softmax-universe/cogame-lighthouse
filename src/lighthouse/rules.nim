@@ -1,5 +1,5 @@
 ## Lighthouse action parsing and scripted rule policies. The game and
-## bundled player share this code for validation and timeout fallback.
+## bundled player share this code for validation and intentional scripted play.
 
 import std/[algorithm, json, strutils, unicode]
 import sim
@@ -23,11 +23,11 @@ type
 
 proc parseScriptKind*(text: string): ScriptKind =
   ## PLAYER_SCRIPTED values: "lantern" the keeper baseline, "wallhug" the
-  ## runner baseline, "1"/"true"/"yes" whichever the dealt slot needs.
+  ## runner baseline, "1" whichever the dealt slot needs.
   case text.strip().toLowerAscii()
-  of "lantern", "keeper": skLantern
-  of "wallhug", "runner", "wall-hug": skWallhug
-  of "1", "true", "yes": skAuto
+  of "lantern": skLantern
+  of "wallhug": skWallhug
+  of "1": skAuto
   else: skNone
 
 proc roleKind*(seat: int, registered: ScriptKind): ScriptKind =
@@ -67,16 +67,27 @@ proc collapseNewlines*(text: string): string =
 # ---- Direction vocabulary ---------------------------------------------------
 
 proc parseMoveToken*(text: string): Move =
-  ## The five legal tokens, case-insensitive, with the obvious aliases.
+  ## The five canonical runner moves: N, S, E, W, WAIT.
   ## Anything else is a parse failure.
-  case text.strip().toUpperAscii()
-  of "N", "NORTH", "UP": mvNorth
-  of "S", "SOUTH", "DOWN": mvSouth
-  of "E", "EAST", "RIGHT": mvEast
-  of "W", "WEST", "LEFT": mvWest
-  of "WAIT", "STAY", "HOLD", "H": mvWait
+  case text.strip()
+  of "N": mvNorth
+  of "S": mvSouth
+  of "E": mvEast
+  of "W": mvWest
+  of "WAIT": mvWait
   else:
     raise newException(LighthouseError, "not a move token: " & text)
+
+proc parseOrderToken(text: string): Move =
+  ## Direction vocabulary for keeper-to-runner radio messages parsed by wallhug.
+  case text.strip().toUpperAscii()
+  of "N": mvNorth
+  of "S": mvSouth
+  of "E": mvEast
+  of "W": mvWest
+  of "WAIT", "HOLD", "H": mvWait
+  else:
+    raise newException(LighthouseError, "not an order token: " & text)
 
 proc stepWord(move: Move): string =
   if move == mvWait: "hold" else: $move
@@ -196,7 +207,7 @@ proc orderedDirection*(message, alias: string): tuple[found: bool, move: Move] =
         inc stop
       if stop > index:
         try:
-          return (true, parseMoveToken(lower[index ..< stop]))
+          return (true, parseOrderToken(lower[index ..< stop]))
         except LighthouseError:
           discard
     start = lower.find(key, start + 1)
@@ -338,33 +349,39 @@ proc decisionJson*(seat: int, decision: Decision): JsonNode =
 # ---- Reply parsing ----------------------------------------------------------
 
 proc parseKeeperReply*(payload: JsonNode): Decision =
-  ## `transmit` absent is inferred from a non-empty message; an empty or
-  ## whitespace-only message is silence whatever the flag says.
-  if payload.kind != JObject or
-      not (payload.hasKey("transmit") or payload.hasKey("message") or
-        payload.hasKey("notes")):
-    raise newException(LighthouseError,
-      "no transmit/message/notes in response")
-  result.notes = cleanText(payload{"notes"}.getStr(), MaxKeeperNotes)
-  result.message = cleanText(
-    collapseNewlines(payload{"message"}.getStr()), MaxMessageLen)
+  ## Canonical keeper action: {"transmit": bool, "message": string, "notes": string}.
+  ## An empty or whitespace-only message is silence even when transmit is true.
+  if payload.kind != JObject:
+    raise newException(LighthouseError, "reply is not a JSON object")
   let flag = payload{"transmit"}
-  var wants = result.message.len > 0
-  if not flag.isNil:
-    case flag.kind
-    of JBool: wants = flag.getBool()
-    of JString: wants = flag.getStr().strip().toLowerAscii() in
-      ["1", "true", "yes"]
-    of JInt: wants = flag.getInt() != 0
-    else: discard
-  result.transmit = wants and result.message.len > 0
+  if flag.isNil or flag.kind != JBool:
+    raise newException(LighthouseError, "transmit must be a boolean")
+  let notesNode = payload{"notes"}
+  if not notesNode.isNil:
+    if notesNode.kind != JString:
+      raise newException(LighthouseError, "notes must be a string")
+    result.notes = cleanText(notesNode.getStr(), MaxKeeperNotes)
+  let messageNode = payload{"message"}
+  if messageNode.isNil:
+    if flag.getBool():
+      raise newException(LighthouseError, "message must be a string")
+  else:
+    if messageNode.kind != JString:
+      raise newException(LighthouseError, "message must be a string")
+    result.message = cleanText(
+      collapseNewlines(messageNode.getStr()), MaxMessageLen)
+  result.transmit = flag.getBool() and result.message.len > 0
   if not result.transmit:
     result.message = ""
 
 proc parseRunnerReply*(payload: JsonNode): Decision =
   if payload.kind != JObject:
     raise newException(LighthouseError, "reply is not a JSON object")
-  result.notes = cleanText(payload{"notes"}.getStr(), MaxRunnerNotes)
+  let notesNode = payload{"notes"}
+  if not notesNode.isNil:
+    if notesNode.kind != JString:
+      raise newException(LighthouseError, "notes must be a string")
+    result.notes = cleanText(notesNode.getStr(), MaxRunnerNotes)
   let node = payload{"move"}
   if node.isNil:
     raise newException(LighthouseError, "no move in response")

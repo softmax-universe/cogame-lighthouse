@@ -4,7 +4,6 @@ include "../src/lighthouse/player_policy"
 block:
   putEnv("COWORLD_LLM_ENDPOINT", "http://127.0.0.1:9100/")
   putEnv("COWORLD_LLM_MODEL", "anthropic/claude-sonnet-4.6")
-  putEnv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "http://retired.invalid")
   putEnv("ANTHROPIC_API_KEY", "local-key-must-not-be-used")
   let client = newLlmClient("claude-haiku-4-5-20251001", 128, 5)
   for slot in 0 .. 1:
@@ -13,6 +12,5 @@ block:
     doAssert request.headers["X-Coworld-Player-Slot"] == $slot
     let body = parseJson(request.body)
     doAssert body["model"].getStr() == "anthropic/claude-sonnet-4.6"
-    doAssert not body.hasKey("anthropic_version")
     doAssert not body.hasKey("output_config")
   echo "hosted sidecar routing and seat attribution passed"

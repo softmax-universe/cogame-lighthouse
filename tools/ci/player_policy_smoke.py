@@ -153,9 +153,12 @@ def verify_model_episode(*, invalid: bool = False) -> None:
                 assert game.wait(timeout=60) != 0
                 assert ModelStub.calls == [("/v1/messages", "1")]
                 assert not (work / "results.json").exists()
-                failure = (work / "player_failure.json").read_text()
-                assert "could not produce a decision" in failure, failure
-                print("malformed model reply: one HTTP call, player failure, no scores")
+                failure = json.loads((work / "player_failure.json").read_text())
+                assert failure["kind"] == "player_error"
+                assert failure["failed_policy_index"] == 1
+                assert "could not produce a decision" in failure["message"], failure
+                assert "malformed" in failure["message"], failure
+                print("malformed model reply: one HTTP call, player failure with raw output, no scores")
                 return
             assert game.wait(timeout=60) == 0, (work / "game.log").read_text()
             for player in processes[1:]:

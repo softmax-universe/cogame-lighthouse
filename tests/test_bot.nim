@@ -271,12 +271,18 @@ suite "reply parsing":
     check parseJsonObject("```{\"move\":\"S\"}```")["move"].getStr() == "S"
     check parseJsonObject("```\n{\"move\":\"W\",\"notes\":\"ok\"}\n```")["move"].getStr() == "W"
     check parseJsonObject("  ```JSON\r\n{\"transmit\":false,\"message\":\"\"}\r\n```  ")["transmit"].getBool() == false
+    check parseJsonObject("<action>{\"move\":\"N\"}</action>")["move"].getStr() == "N"
+    check parseJsonObject("Checking window: W is open.\n<action>{\"move\":\"W\"}</action>")["move"].getStr() == "W"
+    check parseJsonObject("Brief check.\n<action>\n```json\n{\"transmit\":false}\n```\n</action>")["transmit"].getBool() == false
     for bad in [
       "Here is my move:\n```json\n{\"move\":\"N\"}\n```",
       "```json\n{\"move\":\"N\"}\n```\nDone.",
       "```json\n{\"move\":\"N\"}\n```\n```json\n{\"move\":\"S\"}\n```",
       "```python\n{\"move\":\"N\"}\n```",
       "Sure! {\"move\":\"S\"} hope that helps",
+      "<action>{\"move\":\"N\"}</action><action>{\"move\":\"S\"}</action>",
+      "<action>{\"move\":\"N\"}",
+      "</action>{\"move\":\"N\"}<action>",
       "I cannot help with that.",
       "[1, 2, 3]"
     ]:

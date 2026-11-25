@@ -14,6 +14,16 @@ from prompt_selection import BANK, PromptSelection
 
 def parse_json_object(text: str) -> dict:
     trimmed = text.strip()
+    open_count = trimmed.count("<action>")
+    close_count = trimmed.count("</action>")
+    if open_count or close_count:
+        if open_count != 1 or close_count != 1:
+            raise ValueError("ambiguous or unclosed <action> tag")
+        start = trimmed.find("<action>")
+        end = trimmed.find("</action>")
+        if end < start + len("<action>"):
+            raise ValueError("malformed <action> tag")
+        trimmed = trimmed[start + len("<action>") : end].strip()
     candidate = trimmed
     if trimmed.startswith("```") and trimmed.endswith("```"):
         newline = trimmed.find("\n")

@@ -135,9 +135,10 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY one JSON object, no markdown fences and no extra text: " &
-    "{\"transmit\":true,\"message\":\"...\"} (at most " & $MaxMessageLen &
-    " characters, delivered next tick) or {\"transmit\":false}.")
+  result.add("Output your final decision as one JSON object inside " &
+    "<action>{\"transmit\":true,\"message\":\"...\"}</action> (at most " &
+    $MaxMessageLen & " characters, delivered next tick) or " &
+    "<action>{\"transmit\":false}</action>.")
 
 proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("Tick " & $view["tick"].getInt() & " of " &
@@ -176,8 +177,8 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
   result.add("Choose N, S, E, W, or WAIT (N is up, S is down). " &
-    "Reply with ONLY one JSON object, no markdown fences and no extra text: " &
-    "{\"move\":\"N\"}.")
+    "Output your final decision as one JSON object inside " &
+    "<action>{\"move\":\"N\"}</action>.")
 
 proc keeperSimFromView(view: JsonNode): Sim =
   ## Rebuild only the keeper-visible rule state used by the prompt and
@@ -293,11 +294,35 @@ proc unwrapSingleMarkdownFence(text: string): string =
         return rest
   trimmed
 
+proc extractSingleActionTag(text: string): tuple[found: bool, body: string] =
+  ## Extracts the payload of a single unambiguous <action>...</action> answer
+  ## fence. Rejects multiple, nested, or unclosed tags without scraping prose.
+  const
+    OpenTag = "<action>"
+    CloseTag = "</action>"
+  let openCount = text.count(OpenTag)
+  let closeCount = text.count(CloseTag)
+  if openCount == 0 and closeCount == 0:
+    return (false, text)
+  if openCount != 1 or closeCount != 1:
+    let head = cleanText(text, 800).replace("\n", " ")
+    raise newException(LighthouseError,
+      "ambiguous or unclosed <action> tag: " & head)
+  let startIdx = text.find(OpenTag)
+  let endIdx = text.find(CloseTag)
+  if startIdx < 0 or endIdx < startIdx + OpenTag.len:
+    let head = cleanText(text, 800).replace("\n", " ")
+    raise newException(LighthouseError,
+      "malformed <action> tag: " & head)
+  (true, text[startIdx + OpenTag.len ..< endIdx].strip())
+
 proc parseJsonObject*(text: string): JsonNode =
-  ## Parses a canonical JSON object reply, allowing a single Markdown
-  ## presentation fence without scraping prose or inventing actions.
+  ## Parses a canonical JSON object reply, allowing either a single
+  ## <action>...</action> answer fence or a single top-level Markdown fence
+  ## without scraping braces from prose or inventing actions.
   let trimmed = text.strip()
-  let candidate = unwrapSingleMarkdownFence(trimmed)
+  let tagged = extractSingleActionTag(trimmed)
+  let candidate = unwrapSingleMarkdownFence(tagged.body)
   try:
     result = parseJson(candidate)
   except CatchableError as error:

@@ -286,7 +286,7 @@
     "docs": {
       "readme": {
         "type": "text",
-        "value": "Lighthouse is a cooperative maze game about grounded instruction-following across an information asymmetry. One cog - the keeper - sees the whole maze and cannot move. Three blind runners see a 3x3 window and must gather three keys and reach the single exit before the tide, which rises from the bottom and never recedes. The keeper may transmit one short message per tick; it lands at the start of the next tick, and it costs the team an extra unit of tide. Silence is the only way to buy time, so the keeper must say only what changes what a runner will do. Everyone shares one score: keys collected, runners out, and a time bonus for getting all three out with the clock still low. The bundled prompt player uses PLAYER_PROMPT and requires LLM credentials. Ordinary player policies receive private turns and submit keeper or runner actions over the same player socket. Bundled scripted players (PLAYER_SCRIPTED=lantern or wallhug) compute lantern and wallhug decisions from their private observations. Missing or invalid actions terminate the episode as an explicit player failure with no scores."
+        "value": "Lighthouse is a cooperative maze game about grounded instruction-following across an information asymmetry. One cog - the keeper - sees the whole maze and cannot move. Three blind runners see a 3x3 window and must gather three keys and reach the single exit before the tide, which rises from the bottom and never recedes. The keeper may transmit one short message per tick; it lands at the start of the next tick, and it costs the team an extra unit of tide. Silence is the only way to buy time, so the keeper must say only what changes what a runner will do. Everyone shares one score: keys collected, runners out, and a time bonus for getting all three out with the clock still low. The bundled model policy (lighthouse-player) sets COWORLD_LLM_ENABLED=true and COWORLD_LLM_MODEL, routing model calls through COWORLD_LLM_ENDPOINT with PLAYER_PROMPT. Ordinary player policies receive private turns and submit keeper or runner actions over the same player socket. Bundled scripted baselines (lighthouse-lantern with PLAYER_SCRIPTED=lantern and lighthouse-wallhug with PLAYER_SCRIPTED=wallhug) compute lantern and wallhug decisions from their private observations. Missing or invalid actions terminate the episode as an explicit player failure with no scores."
       },
       "pages": [
         {
@@ -301,6 +301,30 @@
     }
   },
   "player": [
+    {
+      "id": "lighthouse-player",
+      "name": "Lighthouse Prompt Player",
+      "type": "player",
+      "description": "The reference Lighthouse model policy: calls the routed LLM via COWORLD_LLM_ENDPOINT using COWORLD_LLM_MODEL and PLAYER_PROMPT (or a default strategy) from its private observation. The same prompt must work in either role, because the platform may seat it anywhere. Field your own policy by uploading this image with a different PLAYER_PROMPT or COWORLD_LLM_MODEL.",
+      "image": "{{LIGHTHOUSE_IMAGE}}",
+      "run": [
+        "/bin/lighthouse-player"
+      ],
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5"
+      },
+      "resources": {
+        "requests": {
+          "cpu": "100m",
+          "memory": "64Mi"
+        },
+        "limits": {
+          "cpu": "1"
+        }
+      },
+      "source_url": "https://github.com/softmax-universe/cogame-lighthouse/tree/main"
+    },
     {
       "id": "lighthouse-lantern",
       "name": "Lighthouse Scripted Lantern",
@@ -430,14 +454,15 @@
       "seed": 11,
       "maxTicks": 10,
       "turnDelayMs": 0,
+      "decisionTimeoutSeconds": 30,
       "player_connect_timeout_seconds": 180
     },
     "players": [
       {
-        "player_id": "lighthouse-lantern"
+        "player_id": "lighthouse-player"
       },
       {
-        "player_id": "lighthouse-wallhug"
+        "player_id": "lighthouse-lantern"
       },
       {
         "player_id": "lighthouse-wallhug"

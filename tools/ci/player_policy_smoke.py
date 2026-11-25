@@ -29,7 +29,12 @@ class ModelStub(BaseHTTPRequestHandler):
         self.calls.append((self.path, slot))
         assert self.path == "/v1/messages"
         assert self.briefing in request["system"]
-        payload = {"content": [{"type": "text", "text": '{"move":"WAIT","notes":""}'}]}
+        reply = (
+            '```json\n{"move":"WAIT","notes":""}\n```'
+            if len(self.calls) % 2 == 1
+            else '{"move":"WAIT","notes":""}'
+        )
+        payload = {"content": [{"type": "text", "text": reply}]}
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

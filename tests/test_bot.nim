@@ -264,6 +264,9 @@ suite "reply parsing":
     check parseJsonObject("""{"move":"N"}""")["move"].getStr() == "N"
     check parseJsonObject("  {\"move\":\"S\"} \n")["move"].getStr() == "S"
     check parseJsonObject("```json\n{\"move\":\"N\"}\n```")["move"].getStr() == "N"
+    check parseJsonObject("```json {\"move\":\"E\"}```")["move"].getStr() == "E"
+    check parseJsonObject("```json {\"move\":\"W\"}\n```")["move"].getStr() == "W"
+    check parseJsonObject("```{\"move\":\"S\"}```")["move"].getStr() == "S"
     check parseJsonObject("```\n{\"move\":\"W\",\"notes\":\"ok\"}\n```")["move"].getStr() == "W"
     check parseJsonObject("  ```JSON\r\n{\"transmit\":false,\"message\":\"\"}\r\n```  ")["transmit"].getBool() == false
     for bad in [

@@ -41,7 +41,7 @@ when isMainModule:
     else: newLlmClient(
       getEnv("PLAYER_MODEL", "claude-sonnet-5"),
       parseInt(getEnv("PLAYER_MAX_OUTPUT_TOKENS", "900")),
-      parseInt(getEnv("PLAYER_TIMEOUT_SECONDS", "18")))
+      parseInt(getEnv("PLAYER_TIMEOUT_SECONDS", "25")))
 
   echo "lighthouse player: connecting to game"
   let socket = newWebSocket(url)
@@ -79,7 +79,11 @@ when isMainModule:
           else: choosePromptAction(client, selection, view, prompt, slot)
       except CatchableError as error:
         stderr.writeLine("lighthouse player: decision failed: ", error.msg)
-        socket.send($ %*{"type": "decision_failed", "tick": payload["tick"]})
+        socket.send($ %*{
+          "type": "decision_failed",
+          "tick": payload["tick"],
+          "error": error.msg
+        })
         continue
       socket.send($ %*{
         "type": "decision", "tick": payload["tick"],

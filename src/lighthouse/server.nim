@@ -562,10 +562,16 @@ proc websocketHandler(
         let payload = parseJson(message.data)
         if payload{"type"}.getStr() == "decision_failed":
           let tick = payload["tick"].getInt()
+          let detail = cleanText(payload{"error"}.getStr(), 1200)
           withLock stateLock:
             if tick == state.pendingTick and state.failedSlot < 0:
               state.failedSlot = slot
-              state.failureMessage = "seat " & $slot & " could not produce a decision on tick " & $tick
+              state.failureMessage =
+                if detail.len > 0:
+                  "seat " & $slot & " could not produce a decision on tick " &
+                    $tick & ": " & detail
+                else:
+                  "seat " & $slot & " could not produce a decision on tick " & $tick
         elif payload{"type"}.getStr() == "decision":
           let tick = payload["tick"].getInt()
           let action = payload["action"]

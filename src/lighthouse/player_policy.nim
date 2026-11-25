@@ -135,10 +135,9 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Send a message with {\"transmit\":true,\"message\":\"…\"}, " &
-    "or stay silent with {\"transmit\":false}. Messages reach the runners next tick " &
-    "and can contain up to " & $MaxMessageLen & " characters. " &
-    "You may add a short private notes string.")
+  result.add("Reply with ONLY one JSON object, no markdown fences and no extra text: " &
+    "{\"transmit\":true,\"message\":\"...\"} (at most " & $MaxMessageLen &
+    " characters, delivered next tick) or {\"transmit\":false}.")
 
 proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("Tick " & $view["tick"].getInt() & " of " &
@@ -177,7 +176,8 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
   result.add("Choose N, S, E, W, or WAIT (N is up, S is down). " &
-    "Reply like {\"move\":\"N\"}. You may add a short private notes string.")
+    "Reply with ONLY one JSON object, no markdown fences and no extra text: " &
+    "{\"move\":\"N\"}.")
 
 proc keeperSimFromView(view: JsonNode): Sim =
   ## Rebuild only the keeper-visible rule state used by the prompt and
@@ -301,7 +301,7 @@ proc parseJsonObject*(text: string): JsonNode =
   try:
     result = parseJson(candidate)
   except CatchableError as error:
-    let head = cleanText(trimmed, 160).replace("\n", " ")
+    let head = cleanText(trimmed, 800).replace("\n", " ")
     raise newException(LighthouseError,
       "invalid JSON response (" & error.msg & "): " & head)
   if result.kind != JObject:

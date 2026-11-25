@@ -133,7 +133,7 @@
           "type": "integer",
           "minimum": 5,
           "maximum": 300,
-          "default": 18
+          "default": 30
         },
         "player_connect_timeout_seconds": {
           "type": "number",

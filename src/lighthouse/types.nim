@@ -85,7 +85,7 @@ proc defaultGameConfig*(): GameConfig =
     episodeTimeoutSeconds: 1200,
     turnDelayMs: 250,
     playerConnectTimeoutSeconds: 180,
-    decisionTimeoutSeconds: 18
+    decisionTimeoutSeconds: 30
   )
 
 proc update*(config: var GameConfig, configJson: string) =

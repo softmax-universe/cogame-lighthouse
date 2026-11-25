@@ -30,11 +30,16 @@ class ModelStub(BaseHTTPRequestHandler):
         self.calls.append((self.path, slot))
         assert self.path == "/v1/messages"
         assert self.briefing in request["system"]
-        reply = (
-            '```json\n{"move":"WAIT","notes":""}\n```'
-            if len(self.calls) % 2 == 1
-            else '{"move":"WAIT","notes":""}'
-        )
+        call_index = len(self.calls)
+        if call_index % 3 == 1:
+            reply = (
+                "Window check:\n```\n###\n.@#\n#.#\n```\n"
+                '```json\n{"move":"WAIT","notes":""}\n```\nWaiting.'
+            )
+        elif call_index % 3 == 2:
+            reply = 'Window check: holding position.\n\n{"move":"WAIT","notes":""}'
+        else:
+            reply = '{"move":"WAIT","notes":""}'
         if self.invalid:
             reply = "malformed"
         payload = {"content": [{"type": "text", "text": reply}]}

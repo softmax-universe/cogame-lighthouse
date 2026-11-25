@@ -135,7 +135,8 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY {\"transmit\": true, \"message\": \"…\", " &
+  result.add("Reply with ONLY a single raw JSON object (no markdown fences, " &
+    "no extra text): {\"transmit\": true, \"message\": \"…\", " &
     "\"notes\": \"…\"} — message at most " & $MaxMessageLen &
     " characters and reaching the runners next tick (transmit false for " &
     "silence, which costs the tide one unit instead of two); notes at " &
@@ -177,7 +178,8 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
   result.add("YOUR NOTES:\n" &
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY {\"move\": \"N\", \"notes\": \"…\"} — move " &
+  result.add("Reply with ONLY a single raw JSON object (no markdown fences, " &
+    "no extra text): {\"move\": \"N\", \"notes\": \"…\"} — move " &
     "is one of N, S, E, W, WAIT (N is up, S is down); notes at most " &
     $MaxRunnerNotes & " characters.")
 
@@ -274,20 +276,26 @@ proc unwrapSingleMarkdownFence(text: string): string =
   ## surrounding the entire trimmed reply. Rejects prose outside the fence or
   ## multiple fences without inventing actions.
   let trimmed = text.strip()
-  if not trimmed.startsWith("```"):
+  if not trimmed.startsWith("```") or not trimmed.endsWith("```") or trimmed.len < 6:
     return trimmed
-  let firstNewline = trimmed.find('\n')
-  if firstNewline < 0:
+  let body = trimmed[3 ..< trimmed.len - 3]
+  if "```" in body:
     return trimmed
-  let header = trimmed[3 ..< firstNewline].strip().toLowerAscii()
-  if header.len > 0 and header != "json":
-    return trimmed
-  if not trimmed.endsWith("```"):
-    return trimmed
-  let inner = trimmed[firstNewline + 1 ..< trimmed.len - 3]
-  if "```" in inner:
-    return trimmed
-  inner.strip()
+  let firstNewline = body.find('\n')
+  if firstNewline >= 0:
+    let header = body[0 ..< firstNewline].strip().toLowerAscii()
+    if header.len == 0 or header == "json":
+      return body[firstNewline + 1 .. ^1].strip()
+  let stripped = body.strip()
+  if stripped.startsWith("{"):
+    return stripped
+  if stripped.len >= 4 and stripped[0 ..< 4].toLowerAscii() == "json":
+    let afterLang = stripped[4 .. ^1]
+    if afterLang.len > 0 and afterLang[0] in {' ', '\t'}:
+      let rest = afterLang.strip()
+      if rest.startsWith("{"):
+        return rest
+  trimmed
 
 proc parseJsonObject*(text: string): JsonNode =
   ## Parses a canonical JSON object reply, allowing a single Markdown
@@ -303,13 +311,13 @@ proc parseJsonObject*(text: string): JsonNode =
   if result.kind != JObject:
     raise newException(LighthouseError, "response must be a JSON object")
 
-proc requestFor(client: LlmClient, system, user: string, slot: int):
-    tuple[url: string, headers: HttpHeaders, body: string] =
+proc requestForMessages(client: LlmClient, system: string, messages: JsonNode,
+    slot: int): tuple[url: string, headers: HttpHeaders, body: string] =
   var body = %*{
     "model": client.model,
     "max_tokens": client.maxOutputTokens,
     "system": system,
-    "messages": [{"role": "user", "content": user}]
+    "messages": messages
   }
   var headers: HttpHeaders
   headers["content-type"] = "application/json"
@@ -323,6 +331,10 @@ proc requestFor(client: LlmClient, system, user: string, slot: int):
     result.url = AnthropicUrl
   result.headers = headers
   result.body = $body
+
+proc requestFor(client: LlmClient, system, user: string, slot: int):
+    tuple[url: string, headers: HttpHeaders, body: string] =
+  client.requestForMessages(system, %*[{"role": "user", "content": user}], slot)
 
 proc textOf(client: LlmClient, response: Response, error, url: string):
     string =
@@ -351,13 +363,30 @@ proc textOf(client: LlmClient, response: Response, error, url: string):
 
 # ---- Decisions --------------------------------------------------------------
 
+proc sendMessages(client: LlmClient, system: string, messages: JsonNode,
+    slot: int): string =
+  var batch: RequestBatch
+  let request = client.requestForMessages(system, messages, slot)
+  batch.post(request.url, request.headers, request.body, $slot)
+  let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
+  client.textOf(responses[0].response, responses[0].error, request.url)
+
 proc choosePromptAction*(client: LlmClient, selection: PromptSelection, view: JsonNode,
     prompt: string, seat: int): Decision =
   let prompts = promptsFromView(selection, view, prompt)
-  var batch: RequestBatch
-  let request = client.requestFor(prompts.system, prompts.user, seat)
-  batch.post(request.url, request.headers, request.body, $seat)
-  let responses = client.curl.makeRequests(batch, client.timeoutSeconds)
-  let answer = client.textOf(responses[0].response,
-    responses[0].error, request.url)
-  parseReply(seat, parseJsonObject(answer))
+  var messages = %*[{"role": "user", "content": prompts.user}]
+  let answer = client.sendMessages(prompts.system, messages, seat)
+  try:
+    return parseReply(seat, parseJsonObject(answer))
+  except LighthouseError as firstErr:
+    echo "lighthouse llm: slot ", seat, " reply rejected (", firstErr.msg,
+      "); retrying once for valid JSON"
+    messages.add(%*{"role": "assistant", "content": answer})
+    messages.add(%*{
+      "role": "user",
+      "content": "Your previous reply could not be parsed (" & firstErr.msg &
+        "). Reply with ONLY a single raw JSON object matching the required " &
+        "schema, with no markdown fences and no extra text."
+    })
+    let retryAnswer = client.sendMessages(prompts.system, messages, seat)
+    parseReply(seat, parseJsonObject(retryAnswer))

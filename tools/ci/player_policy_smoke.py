@@ -17,6 +17,7 @@ from typing import ClassVar
 
 class ModelStub(BaseHTTPRequestHandler):
     calls: ClassVar[list[tuple[str, str]]] = []
+    invalid: ClassVar[bool] = False
     briefing: ClassVar[str] = json.loads(
         (
             Path(__file__).resolve().parents[2] / "players/ordinary/prompt_bank.json"
@@ -34,6 +35,8 @@ class ModelStub(BaseHTTPRequestHandler):
             if len(self.calls) % 2 == 1
             else '{"move":"WAIT","notes":""}'
         )
+        if self.invalid:
+            reply = "malformed"
         payload = {"content": [{"type": "text", "text": reply}]}
         data = json.dumps(payload).encode()
         self.send_response(200)
@@ -52,7 +55,9 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def main() -> None:
+def verify_model_episode(*, invalid: bool = False) -> None:
+    ModelStub.invalid = invalid
+    ModelStub.calls.clear()
     game_bin, player_bin = map(Path, sys.argv[1:3])
     game_port = free_port()
     stub = ThreadingHTTPServer(("127.0.0.1", 0), ModelStub)
@@ -87,6 +92,7 @@ def main() -> None:
                 "COGAME_PORT": str(game_port),
                 "COGAME_CONFIG_URI": (work / "config.json").as_uri(),
                 "COGAME_RESULTS_URI": (work / "results.json").as_uri(),
+                "COGAME_PLAYER_FAILURE_URI": (work / "player_failure.json").as_uri(),
                 "COGAME_SAVE_REPLAY_URI": (work / "replay.json").as_uri(),
             }
         )
@@ -143,7 +149,14 @@ def main() -> None:
                         argv, env=env, stdout=handle, stderr=subprocess.STDOUT
                     )
                 )
-            assert game.wait(timeout=60) == 0
+            if invalid:
+                assert game.wait(timeout=60) != 0
+                assert ModelStub.calls == [("/v1/messages", "1")]
+                assert not (work / "results.json").exists()
+                assert (work / "player_failure.json").is_file()
+                print("malformed model reply: one HTTP call, player failure, no scores")
+                return
+            assert game.wait(timeout=60) == 0, (work / "game.log").read_text()
             for player in processes[1:]:
                 assert player.wait(timeout=10) == 0
             results = json.loads((work / "results.json").read_text())
@@ -281,5 +294,6 @@ def verify_invalid_action_fails_terminally(game_bin: Path, player_bin: Path) -> 
 
 
 if __name__ == "__main__":
-    main()
+    verify_model_episode()
+    verify_model_episode(invalid=True)
     verify_invalid_action_fails_terminally(*map(Path, sys.argv[1:3]))

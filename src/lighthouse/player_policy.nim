@@ -135,7 +135,7 @@ proc keeperPrompt*(sim: Sim, prompt: string): string =
     (if transcript.len > 0: transcript.join("\n")
      else: "(you have not spoken yet)") & "\n\n")
   result.add(operatorBlock(prompt))
-  result.add("Reply with ONLY one JSON object, no markdown fences and no extra text: " &
+  result.add("Reply with one JSON object: " &
     "{\"transmit\":true,\"message\":\"...\"} (at most " & $MaxMessageLen &
     " characters, delivered next tick) or {\"transmit\":false}.")
 
@@ -176,8 +176,7 @@ proc runnerPromptFromView(view: JsonNode, prompt: string): string =
     (if notes.len > 0: notes else: "(none)") & "\n\n")
   result.add(operatorBlock(prompt))
   result.add("Choose N, S, E, W, or WAIT (N is up, S is down). " &
-    "Reply with ONLY one JSON object, no markdown fences and no extra text: " &
-    "{\"move\":\"N\"}.")
+    "Reply with one JSON object: {\"move\":\"N\"}.")
 
 proc keeperSimFromView(view: JsonNode): Sim =
   ## Rebuild only the keeper-visible rule state used by the prompt and
@@ -267,43 +266,202 @@ proc promptsFromView*(selection: PromptSelection, view: JsonNode, prompt: string
 
 # ---- Sidecar / Anthropic transport ------------------------------------------
 
-proc unwrapSingleMarkdownFence(text: string): string =
-  ## Unwraps at most one top-level Markdown presentation fence (``` or ```json)
-  ## surrounding the entire trimmed reply. Rejects prose outside the fence or
-  ## multiple fences without inventing actions.
-  let trimmed = text.strip()
-  if not trimmed.startsWith("```") or not trimmed.endsWith("```") or trimmed.len < 6:
-    return trimmed
-  let body = trimmed[3 ..< trimmed.len - 3]
-  if "```" in body:
-    return trimmed
-  let firstNewline = body.find('\n')
-  if firstNewline >= 0:
-    let header = body[0 ..< firstNewline].strip().toLowerAscii()
-    if header.len == 0 or header == "json":
-      return body[firstNewline + 1 .. ^1].strip()
-  let stripped = body.strip()
-  if stripped.startsWith("{"):
-    return stripped
-  if stripped.len >= 4 and stripped[0 ..< 4].toLowerAscii() == "json":
-    let afterLang = stripped[4 .. ^1]
-    if afterLang.len > 0 and afterLang[0] in {' ', '\t'}:
-      let rest = afterLang.strip()
-      if rest.startsWith("{"):
-        return rest
-  trimmed
+proc rawReplyPreview(text: string): string =
+  let flat = text.replace("\r\n", "\n").replace("\n", " ").strip()
+  if flat.len <= 800:
+    return cleanText(flat, 800)
+  let head = cleanText(flat, 380)
+  let tailStart = max(0, flat.len - 380)
+  let tail = cleanText(flat[tailStart .. ^1], 380)
+  head & " ... " & tail
+
+proc tryParseJsonObj(candidate: string): tuple[ok: bool, node: JsonNode] =
+  let s = candidate.strip()
+  if not s.startsWith("{") or not s.endsWith("}"):
+    return (false, nil)
+  try:
+    let parsed = parseJson(s)
+    if parsed.kind == JObject:
+      return (true, parsed)
+  except CatchableError:
+    discard
+  (false, nil)
+
+proc containsJsonObject(text: string): bool =
+  ## Detects whether plain text contains any complete JSON object {...}
+  ## so competing answers are rejected as ambiguous.
+  var i = 0
+  while i < text.len:
+    if text[i] == '{':
+      var depth = 0
+      var inStr = false
+      var escaped = false
+      var j = i
+      while j < text.len:
+        let ch = text[j]
+        if inStr:
+          if escaped:
+            escaped = false
+          elif ch == '\\':
+            escaped = true
+          elif ch == '"':
+            inStr = false
+        else:
+          if ch == '"':
+            inStr = true
+          elif ch == '{':
+            inc depth
+          elif ch == '}':
+            dec depth
+            if depth == 0:
+              if tryParseJsonObj(text[i .. j]).ok:
+                return true
+              break
+        inc j
+    inc i
+  false
 
 proc parseJsonObject*(text: string): JsonNode =
-  ## Parses a canonical JSON object reply, allowing a single Markdown
-  ## presentation fence without scraping prose or inventing actions.
+  ## Parses a native JSON object reply:
+  ## 1. Bare JSON object directly.
+  ## 2. A uniquely marked complete Markdown JSON block (```json ... ``` or
+  ##    a single unmarked ``` ... ``` block containing a JSON object), even
+  ##    with prose or non-JSON fences (e.g. a 3x3 window diagram) around it.
+  ## 3. An unambiguous explicit final native JSON object on its own line(s)
+  ##    at the end of the reply.
+  ## Rejects multiple competing answers, incomplete JSON, unclosed fences,
+  ## non-JSON language fences, and prose without a real decision.
   let trimmed = text.strip()
-  let candidate = unwrapSingleMarkdownFence(trimmed)
-  try:
-    result = parseJson(candidate)
-  except CatchableError as error:
-    let head = cleanText(trimmed, 800).replace("\n", " ")
+  if trimmed.len == 0:
+    raise newException(LighthouseError, "invalid JSON response (empty reply)")
+
+  if trimmed.startsWith("{") and trimmed.endsWith("}"):
+    let bare = tryParseJsonObj(trimmed)
+    if bare.ok:
+      return bare.node
+
+  type FencedBlock = object
+    lang: string
+    body: string
+
+  var blocks: seq[FencedBlock] = @[]
+  var outside = ""
+  var pos = 0
+  var lastCloseEnd = 0
+  while true:
+    let openIdx = trimmed.find("```", pos)
+    if openIdx < 0:
+      outside.add(trimmed[pos .. ^1])
+      break
+    outside.add(trimmed[pos ..< openIdx])
+    outside.add("\n")
+    let closeIdx = trimmed.find("```", openIdx + 3)
+    if closeIdx < 0:
+      raise newException(LighthouseError,
+        "incomplete markdown code fence: " & rawReplyPreview(trimmed))
+    let rawBlock = trimmed[openIdx + 3 ..< closeIdx]
+    let nl = rawBlock.find('\n')
+    var lang = ""
+    var body = ""
+    if nl >= 0:
+      let header = rawBlock[0 ..< nl].strip()
+      let headerLower = header.toLowerAscii()
+      if header.len == 0:
+        lang = ""
+        body = rawBlock[nl + 1 .. ^1].strip()
+      elif headerLower == "json":
+        lang = "json"
+        body = rawBlock[nl + 1 .. ^1].strip()
+      elif header.startsWith("{"):
+        lang = ""
+        body = rawBlock.strip()
+      elif headerLower.len >= 4 and headerLower[0 ..< 4] == "json" and
+          (headerLower.len == 4 or headerLower[4] in {' ', '\t'}):
+        lang = "json"
+        body = rawBlock.strip()[4 .. ^1].strip()
+      else:
+        lang = headerLower
+        body = rawBlock[nl + 1 .. ^1].strip()
+    else:
+      let single = rawBlock.strip()
+      let singleLower = single.toLowerAscii()
+      if single.startsWith("{"):
+        lang = ""
+        body = single
+      elif singleLower.len >= 4 and singleLower[0 ..< 4] == "json" and
+          (singleLower.len == 4 or singleLower[4] in {' ', '\t'}):
+        lang = "json"
+        body = single[4 .. ^1].strip()
+      else:
+        lang = singleLower
+        body = ""
+    blocks.add(FencedBlock(lang: lang, body: body))
+    pos = closeIdx + 3
+    lastCloseEnd = pos
+
+  var jsonTagged: seq[FencedBlock] = @[]
+  var unmarkedJson: seq[JsonNode] = @[]
+  for blk in blocks:
+    if blk.lang == "json":
+      jsonTagged.add(blk)
+    elif blk.lang == "":
+      let parsed = tryParseJsonObj(blk.body)
+      if parsed.ok:
+        unmarkedJson.add(parsed.node)
+
+  if jsonTagged.len > 1 or (jsonTagged.len == 1 and unmarkedJson.len > 0) or
+      unmarkedJson.len > 1:
     raise newException(LighthouseError,
-      "invalid JSON response (" & error.msg & "): " & head)
+      "multiple competing JSON blocks: " & rawReplyPreview(trimmed))
+
+  if jsonTagged.len == 1:
+    if containsJsonObject(outside):
+      raise newException(LighthouseError,
+        "multiple competing JSON objects: " & rawReplyPreview(trimmed))
+    try:
+      result = parseJson(jsonTagged[0].body)
+    except CatchableError as error:
+      raise newException(LighthouseError,
+        "invalid JSON in markdown json block (" & error.msg & "): " &
+        rawReplyPreview(trimmed))
+    if result.kind != JObject:
+      raise newException(LighthouseError, "response must be a JSON object")
+    return result
+
+  if unmarkedJson.len == 1:
+    if containsJsonObject(outside):
+      raise newException(LighthouseError,
+        "multiple competing JSON objects: " & rawReplyPreview(trimmed))
+    return unmarkedJson[0]
+
+  # Explicit final native JSON object on its own line(s) at the end of the reply.
+  let tailRaw = trimmed[lastCloseEnd .. ^1]
+  let tail = tailRaw.strip()
+  if tail.endsWith("}"):
+    var lineStart = 0
+    while lineStart < tail.len:
+      var trimmedStart = lineStart
+      while trimmedStart < tail.len and tail[trimmedStart] in {' ', '\t'}:
+        inc trimmedStart
+      if trimmedStart < tail.len and tail[trimmedStart] == '{':
+        let parsed = tryParseJsonObj(tail[trimmedStart .. ^1])
+        if parsed.ok:
+          let beforeFinal = outside[0 ..< max(0, outside.len - tailRaw.len)] &
+            tail[0 ..< trimmedStart]
+          if containsJsonObject(beforeFinal):
+            raise newException(LighthouseError,
+              "multiple competing JSON objects: " & rawReplyPreview(trimmed))
+          return parsed.node
+      let nextNl = tail.find('\n', lineStart)
+      if nextNl < 0:
+        break
+      lineStart = nextNl + 1
+
+  try:
+    result = parseJson(trimmed)
+  except CatchableError as error:
+    raise newException(LighthouseError,
+      "invalid JSON response (" & error.msg & "): " & rawReplyPreview(trimmed))
   if result.kind != JObject:
     raise newException(LighthouseError, "response must be a JSON object")
 

@@ -262,7 +262,7 @@ suite "reply parsing":
       expect LighthouseError:
         discard parseKeeperReply(parseJson(bad))
 
-  test "the transport accepts canonical JSON objects and a single Markdown fence":
+  test "the transport accepts native JSON, a uniquely marked Markdown JSON block, and unambiguous final JSON":
     check parseJsonObject("""{"move":"N"}""")["move"].getStr() == "N"
     check parseJsonObject("  {\"move\":\"S\"} \n")["move"].getStr() == "S"
     check parseJsonObject("```json\n{\"move\":\"N\"}\n```")["move"].getStr() == "N"
@@ -271,14 +271,34 @@ suite "reply parsing":
     check parseJsonObject("```{\"move\":\"S\"}```")["move"].getStr() == "S"
     check parseJsonObject("```\n{\"move\":\"W\",\"notes\":\"ok\"}\n```")["move"].getStr() == "W"
     check parseJsonObject("  ```JSON\r\n{\"transmit\":false,\"message\":\"\"}\r\n```  ")["transmit"].getBool() == false
+    check parseJsonObject("Here is my move:\n```json\n{\"move\":\"N\"}\n```")["move"].getStr() == "N"
+    check parseJsonObject("```json\n{\"move\":\"N\"}\n```\nDone.")["move"].getStr() == "N"
+    check parseJsonObject("```json {\"move\":\"W\",\"notes\":\"ok\"}```\nMoving west.")["move"].getStr() == "W"
+    check parseJsonObject(
+      "Window:\n```\n###\n.@#\n#.#\n```\nWest is open.\n```json\n{\"move\":\"W\"}\n```\nDone."
+    )["move"].getStr() == "W"
+    check parseJsonObject(
+      "Window:\n```\n###\n.@#\n#.#\n```\nWest is open.\n\n{\"move\":\"W\"}"
+    )["move"].getStr() == "W"
+    check parseJsonObject(
+      "Checking state.\n{\n  \"transmit\": false\n}"
+    )["transmit"].getBool() == false
     for bad in [
-      "Here is my move:\n```json\n{\"move\":\"N\"}\n```",
-      "```json\n{\"move\":\"N\"}\n```\nDone.",
       "```json\n{\"move\":\"N\"}\n```\n```json\n{\"move\":\"S\"}\n```",
+      "```\n{\"move\":\"N\"}\n```\n```\n{\"move\":\"S\"}\n```",
+      "```\n{\"move\":\"N\"}\n```\n```json\n{\"move\":\"S\"}\n```",
+      "{\"move\":\"N\"}\n{\"move\":\"S\"}",
+      "First {\"move\":\"N\"}, actually:\n{\"move\":\"S\"}",
+      "First {\"move\":\"N\"}, actually:\n```json\n{\"move\":\"S\"}\n```",
       "```python\n{\"move\":\"N\"}\n```",
+      "```json\n{\"move\":\"N\"",
+      "```json\n{\"move\":\"N\"\n```",
       "Sure! {\"move\":\"S\"} hope that helps",
+      "<action>{\"move\":\"N\"}</action>",
+      "Window:\n```\n###\n.@#\n#.#\n```\nI should go west.",
       "I cannot help with that.",
-      "[1, 2, 3]"
+      "[1, 2, 3]",
+      "```json\n[1, 2, 3]\n```"
     ]:
       expect LighthouseError:
         discard parseJsonObject(bad)
